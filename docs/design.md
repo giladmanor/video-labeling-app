@@ -288,9 +288,13 @@ output directory, with "Show in Finder".
    (If there is no watched time, the export stops with a message.)
 2. Each watched range of a video becomes one clip.
 3. Drop clips shorter than one window length; the export summary shows how many.
-4. Cut each clip from the normalized video by frame number and encode it again (H.264,
-   CRF 18). The labels are frame numbers on the normalized video, so this keeps them exact.
+4. Cut each clip from the normalized video by frame number and encode it again with the
+   normalize settings (H.264, CRF 18, the same fps, one keyframe each second, no audio).
+   The labels are frame numbers on the normalized video, so this keeps them exact.
    A stream copy would cut at keyframes and add unwatched frames.
+   Clip frame `i` has the time `i / fps` exactly, and the first frame is at time 0. So a reader
+   that seeks by time (`start_s`) gets the same frame as a reader that counts frames.
+   A test checks both.
 5. Move the segments to clip frame numbers and fill watched gaps with the background label (0).
 6. Write the label files and the manifests.
 
@@ -298,7 +302,8 @@ output directory, with "Show in Finder".
 
 ```
 exports/{labeler}_{date-time}/
-  export.json                   # app and ffmpeg version, model run, window config, counts
+  export.json                   # app and ffmpeg version, pre-label runs and prompt versions,
+                                # encode settings, window config, label names, counts
   videos/{clip_id}.mp4          # clip_id = {video_id}_{start_frame:06d}
   labels/{clip_id}.json         # one label file for each clip
   manifests/
@@ -308,10 +313,14 @@ exports/{labeler}_{date-time}/
 
 `videos.csv` columns: `video_id`, `source_file`, `sha256`, `fps`, `n_frames`, `duration_s`,
 `width`, `height`, `group_id`, `label_type`, `parent_video_id`, `parent_sha256`,
-`clip_start_s`, `audit`, `labeler`.
+`clip_start_s`, `parent_n_frames`, `parent_duration_s`, `audit`, `labeler`.
+`parent_duration_s` is the full length of the source video, also the parts nobody watched,
+so you can compare the watched time with all the time (section 9, item 2).
 
 `segments.csv` columns: `video_id`, `start_s`, `end_s`, `start_frame`, `end_frame`, `label`,
-`source`, `origin`, `tags`.
+`source`, `origin`, `tags`. `start_s` and `end_s` are seconds on the clip; `end_s` is the end of the
+last frame (`(end_frame + 1) / fps`), so one segment ends where the next starts. `source` is
+`staff` (a person made the label).
 
 ### 8.3 Label file
 
@@ -325,6 +334,8 @@ exports/{labeler}_{date-time}/
   "group_id": "3f2a9c01b7e4",
   "clip_start_s": 12.0,
   "clip_start_frame": 180,
+  "parent_n_frames": 2700,
+  "parent_duration_s": 180.0,
   "fps": 15,
   "n_frames": 300,
   "duration_s": 20.0,

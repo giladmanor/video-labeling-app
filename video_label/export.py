@@ -9,6 +9,7 @@ frames stay exact. The manifests use the format of docs/design.md.
 from __future__ import annotations
 
 import csv
+import json
 import math
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,10 @@ from . import __version__, ffmpeg, store
 from .jobs import sha256_file
 from .windows import CONFIGS, summarize
 from .workspace import Workspace, write_json_atomic
+
+# The clip encode (docs/design.md section 8.1); export.json records it.
+ENCODE = {"codec": "libx264", "crf": 18, "preset": "fast", "pix_fmt": "yuv420p", "gop_s": 1, "audio": False}
+
 
 class NothingToExport(ValueError):
     pass
@@ -39,14 +44,16 @@ def clip_segments(label: dict, a: int, b: int) -> list[dict]:
 
 def cut_clip(src: Path, dst: Path, a: int, b: int, fps: float) -> None:
     """Encode frames a..b of the normalized video. The seek point is half a frame before
-    frame a, so the first frame after an accurate seek is frame a."""
+    frame a, so the first frame after an accurate seek is frame a. Clip frame i gets the time
+    i / fps exactly (the seek leaves an offset), so time-based readers find the labeled frame."""
     tmp = dst.with_name(dst.stem + ".part.mp4")
+    gop = str(round(fps * ENCODE["gop_s"]))
     ffmpeg._run([
         ffmpeg.binaries()[0], "-hide_banner", "-loglevel", "error", "-y", "-nostdin",
         "-ss", f"{max(0.0, (a - 0.5) / fps):.6f}", "-i", str(src),
-        "-frames:v", str(b - a + 1), "-map", "0:v:0",
-        "-c:v", "libx264", "-crf", "18", "-preset", "fast", "-pix_fmt", "yuv420p",
-        "-g", str(round(fps)), "-keyint_min", str(round(fps)), "-sc_threshold", "0",
+        "-frames:v", str(b - a + 1), "-map", "0:v:0", "-vf", f"setpts=N/({fps}*TB)",
+        "-c:v", ENCODE["codec"], "-crf", str(ENCODE["crf"]), "-preset", ENCODE["preset"], "-pix_fmt", ENCODE["pix_fmt"],
+        "-g", gop, "-keyint_min", gop, "-sc_threshold", "0",
         "-an", "-movflags", "+faststart", str(tmp),
     ])
     tmp.replace(dst)
@@ -124,6 +131,8 @@ def export(ws: Workspace, name: str | None = None) -> dict:
             "group_id": row["video_id"],
             "clip_start_s": round(a / fps, 6),
             "clip_start_frame": a,
+            "parent_n_frames": row["n_frames"],
+            "parent_duration_s": row["duration_s"],
             "fps": fps,
             "n_frames": n_frames,
             "duration_s": round(n_frames / fps, 6),
@@ -147,6 +156,8 @@ def export(ws: Workspace, name: str | None = None) -> dict:
             "parent_video_id": row["video_id"],
             "parent_sha256": row["sha256"],
             "clip_start_s": round(a / fps, 6),
+            "parent_n_frames": row["n_frames"],
+            "parent_duration_s": row["duration_s"],
             "audit": 0,
             "labeler": label["labeler"],
         })
@@ -158,18 +169,21 @@ def export(ws: Workspace, name: str | None = None) -> dict:
                 "start_frame": s["start_frame"],
                 "end_frame": s["end_frame"],
                 "label": s["label"],
-                "source": "human",
+                "source": "staff",
                 "origin": s["origin"],
                 "tags": ";".join(s.get("tags", [])),
             })
 
     _write_csv(root / "manifests" / "videos.csv", video_rows, [
         "video_id", "source_file", "sha256", "fps", "n_frames", "duration_s", "width", "height",
-        "group_id", "label_type", "parent_video_id", "parent_sha256", "clip_start_s", "audit", "labeler",
+        "group_id", "label_type", "parent_video_id", "parent_sha256", "clip_start_s",
+        "parent_n_frames", "parent_duration_s", "audit", "labeler",
     ])
     _write_csv(root / "manifests" / "segments.csv", segment_rows, [
         "video_id", "start_s", "end_s", "start_frame", "end_frame", "label", "source", "origin", "tags",
     ])
+    runs = {lab.get("prelabel_run") or "" for lab in used.values()} - {""}
+    fps_all = sorted({float(lab["fps"]) for lab in used.values()})
     info = {
         "name": name,
         "path": str(root),
@@ -183,10 +197,27 @@ def export(ws: Workspace, name: str | None = None) -> dict:
         "dropped_short_parts": dropped_short,
         "label_names": label_names,
         "counts": summarize(list(used.values()), cfg, ws.label_names()),
-        "prelabel_runs": sorted({lab.get("prelabel_run") or "" for lab in used.values()} - {""}),
+        "prelabel_runs": sorted(runs),
+        "prompt_versions": sorted(_prompt_versions(ws, used)),
+        "encode": {**ENCODE, "fps": fps_all[0] if len(fps_all) == 1 else fps_all,
+                   "normalize_max_height": ws.settings.normalize_max_height},
     }
     write_json_atomic(root / "export.json", info)
     return info
+
+
+def _prompt_versions(ws: Workspace, used: dict[str, dict]) -> set[str]:
+    """The prompt versions of the pre-label runs that the exported videos used."""
+    out = set()
+    for vid, lab in used.items():
+        if lab.get("prelabel_run"):
+            try:
+                pre = json.loads(ws.prelabel_path(lab["prelabel_run"], vid).read_text())
+            except (OSError, ValueError):
+                continue
+            if pre.get("prompt_version"):
+                out.add(pre["prompt_version"])
+    return out
 
 
 def _write_csv(path: Path, rows: list[dict], columns: list[str]) -> None:

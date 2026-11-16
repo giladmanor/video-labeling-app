@@ -1,5 +1,6 @@
 """End to end: a generated video goes through the jobs with a fake Grok, then the API."""
 
+import csv
 import json
 import re
 import subprocess
@@ -8,7 +9,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from video_label import ffmpeg, jobs, store
+from video_label import export, ffmpeg, jobs, store
 from video_label.server import create_app
 from video_label.workspace import Workspace
 
@@ -105,6 +106,7 @@ def test_jobs_and_api(tmp_path, library):
 
     info = client.post("/api/export", headers={"X-Video-Label": "1"}).json()
     assert info["clips"] == 1 and info["videos"] == 1
+    assert info["prompt_versions"] == ["prelabel-v1"] and info["encode"]["crf"] == 18
     root = Path(info["path"])
     clip_id = f"{video_id}_000000"
     clip = ffmpeg.probe(root / "videos" / f"{clip_id}.mp4", count_frames=True)
@@ -113,7 +115,9 @@ def test_jobs_and_api(tmp_path, library):
     assert [(s["start_frame"], s["end_frame"], s["label"]) for s in lab["segments"]] == [(0, 44, 0), (45, 67, 1), (68, 119, 0)]
     seg_csv = (root / "manifests" / "segments.csv").read_text().splitlines()
     assert seg_csv[0].startswith("video_id,start_s,end_s") and len(seg_csv) == 4
-    assert "group_id" in (root / "manifests" / "videos.csv").read_text()
+    assert all(line.split(",")[6] == "staff" for line in seg_csv[1:])
+    (vrow,) = csv.DictReader((root / "manifests" / "videos.csv").open())
+    assert vrow["group_id"] == video_id and vrow["parent_duration_s"] == "8.0" and vrow["parent_n_frames"] == "120"
 
     skipped = dict(saved, status="skip")
     assert client.put(f"/api/labels/{video_id}", json=skipped, headers={"X-Video-Label": "1"}).status_code == 200
@@ -217,3 +221,39 @@ def test_manual_prelabel_files(tmp_path, library):
     pre = client.get(f"/api/videos/{video_id}").json()["prelabel"]
     assert pre["covered"] == [[0.0, 7.5]] and pre["candidates"][0]["tags"] == ["mount"]
     assert client.get("/api/manual/../etc").status_code == 404
+
+def _frame_lumas(path: Path) -> list[float]:
+    out = subprocess.run([ffmpeg.binaries()[0], "-hide_banner", "-nostdin", "-i", str(path), "-vf",
+                          "signalstats,metadata=print:key=lavfi.signalstats.YAVG:file=-", "-f", "null", "-"],
+                         capture_output=True, text=True, check=True).stdout
+    return [float(line.split("=")[1]) for line in out.splitlines() if "YAVG" in line]
+
+
+def test_export_clip_frames_are_exact(tmp_path):
+    """Clip frame i is normalized frame a + i, at time i / fps (docs/design.md section 8.1)."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    ff, fp = ffmpeg.binaries()
+    # The gray level codes the frame number; 30 fps in, so the normalize step drops frames.
+    subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+                    "-i", "nullsrc=s=160x120:r=30:d=6,format=gray,geq=lum='20+mod(N\\,200)'",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(lib / "gray.mp4")], check=True)
+    ws = Workspace(tmp_path / "ws")
+    ws.settings.libraries = [str(lib)]
+    ws.settings.labeler = "tester"
+    jobs.scan(ws)
+    (video_id,) = [r["video_id"] for r in ws.videos()]
+    jobs.process_video(ws, video_id, None)
+    label = store.new_label(video_id, "tester", 15, 90, None)
+    label["watched"] = [[37, 80]]   # starts between keyframes
+    store.save(ws.label_path(video_id), label, ws.label_names())
+
+    root = Path(export.export(ws)["path"])
+    clip = root / "videos" / f"{video_id}_000037.mp4"
+    want = _frame_lumas(ws.video_path(video_id))[37:81]
+    got = _frame_lumas(clip)
+    assert len(got) == len(want) == 44
+    assert all(abs(g - w) < 0.6 for g, w in zip(got, want))
+    pts = subprocess.run([fp, "-v", "error", "-select_streams", "v", "-show_entries", "frame=pts_time",
+                          "-of", "csv=p=0", str(clip)], capture_output=True, text=True, check=True).stdout.split()
+    assert [round(float(t.rstrip(",")) * 15, 3) for t in pts] == list(range(44))
