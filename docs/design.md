@@ -66,7 +66,8 @@ these seed labels:
 
 ## 3. Install and run
 
-See the README. The command `video-label` starts a local server on `127.0.0.1:8765` and
+See the README. The one-line installer is [install.sh](../install.sh): it installs uv, the app
+with its own Python, and (if ffmpeg is not on `PATH`) the static ffmpeg build of §3.1. The command `video-label` starts a local server on `127.0.0.1:8765` and
 opens the browser. All screens (setup, videos, labeling, export) are pages of this local app.
 
 Commands:
@@ -88,7 +89,8 @@ The app looks for ffmpeg and ffprobe in this order:
 
 1. the `VIDEO_LABEL_FFMPEG` and `VIDEO_LABEL_FFPROBE` variables;
 2. the binaries on `PATH` (for example Homebrew);
-3. the `static-ffmpeg` Python package, which downloads a pinned static build on first use.
+3. the `static-ffmpeg` Python package, pinned to 3.0 in `pyproject.toml` (ffmpeg 7.0), which
+   downloads its static build on first use (the installer downloads it at install time).
 
 The setup page shows the version. If several people label the same videos, they must use the
 same ffmpeg version, because the label frame numbers refer to the normalized copies.

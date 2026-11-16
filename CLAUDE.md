@@ -24,7 +24,9 @@ same change.
 ## Commands
 
 ```sh
-python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"   # setup
+curl -fsSL https://raw.githubusercontent.com/giladmanor/video-labeling-app/main/install.sh | sh  # user install (install.sh)
+VIDEO_LABEL_SOURCE=$PWD sh install.sh                        # test the installer on this checkout
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"   # dev setup
 .venv/bin/video-label                                        # run (http://127.0.0.1:8765/)
 .venv/bin/video-label --workspace /tmp/ws serve --no-browser # scratch workspace; --workspace goes before the subcommand
 .venv/bin/python -m pytest -q                                # tests (need ffmpeg; generate a test video)

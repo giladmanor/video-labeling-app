@@ -30,18 +30,41 @@ The included prompt and label names target one event type: a driver handling a p
 ## Requirements
 
 - macOS (Apple Silicon or Intel)
-- Python 3.11 or newer
-- ffmpeg (Homebrew `brew install ffmpeg`; if it is missing, the app downloads a static build)
+
+The installer gets everything else. It needs no admin rights, Homebrew, or Xcode tools.
 
 ## Install
 
-With [uv](https://docs.astral.sh/uv/):
+In a terminal:
 
 ```sh
-uv tool install git+https://github.com/giladmanor/video-labeling-app
+curl -fsSL https://raw.githubusercontent.com/giladmanor/video-labeling-app/main/install.sh | sh
 ```
 
-Or from a clone:
+The installer:
+
+1. installs [uv](https://docs.astral.sh/uv/) in `~/.local/bin` if it is missing;
+2. downloads the app from GitHub (git is not needed);
+3. installs the app and its packages with its own Python 3.12 (uv downloads it if needed);
+4. downloads a static ffmpeg build if `ffmpeg` and `ffprobe` are not on `PATH`;
+5. adds `~/.local/bin` to `PATH` in your shell startup file.
+
+Then open a new terminal and run `video-label`.
+
+To update, run the same line again. To uninstall: `uv tool uninstall video-label`.
+
+Options, as variables in front of `sh`:
+
+- `VIDEO_LABEL_REF=<branch, tag, or commit>`: install that version (default `main`).
+- `VIDEO_LABEL_SOURCE=<directory>`: install from a local clone.
+- `VIDEO_LABEL_NO_MODIFY_PATH=1`: do not change the shell startup files.
+
+For example: `curl -fsSL …/install.sh | VIDEO_LABEL_REF=v0.2.0 sh`.
+
+### Install for development
+
+Needs Python 3.11 or newer and ffmpeg (`brew install ffmpeg`; if it is missing, the app
+downloads a static build).
 
 ```sh
 git clone https://github.com/giladmanor/video-labeling-app
