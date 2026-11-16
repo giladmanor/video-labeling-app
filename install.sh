@@ -8,14 +8,15 @@
 #   2. downloads the app source from GitHub (a tarball, so git is not needed);
 #   3. installs the app with uv, with its own Python 3.12 (uv downloads it if needed);
 #   4. downloads a static ffmpeg build if ffmpeg and ffprobe are not on PATH;
-#   5. adds ~/.local/bin to PATH in the shell startup files.
+#   5. adds ~/.local/bin to PATH in the shell startup files;
+#   6. lists what it added in ~/.local/share/video-label/install-receipt (for uninstall.sh).
 #
 # Run it again to update. Options, as environment variables in front of `sh`:
 #   VIDEO_LABEL_REF=<branch|tag|commit>   source to install (default main)
 #   VIDEO_LABEL_SOURCE=<directory>        install from a local checkout instead of GitHub
 #   VIDEO_LABEL_NO_MODIFY_PATH=1          do not change the shell startup files
 #
-# Uninstall: uv tool uninstall video-label
+# Uninstall: curl -fsSL https://raw.githubusercontent.com/giladmanor/video-labeling-app/main/uninstall.sh | sh
 
 # Everything is inside main, so a partly downloaded script does nothing.
 set -eu
@@ -32,6 +33,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 main() {
     ref="${VIDEO_LABEL_REF:-main}"
     bin_dir="$HOME/.local/bin"
+    receipt_dir="$HOME/.local/share/video-label"
 
     case "$(uname -s)" in
         Darwin) ;;
@@ -45,6 +47,7 @@ main() {
     trap 'rm -rf "$tmp"' EXIT INT TERM
 
     # 1. uv
+    uv_ours=""
     if have uv; then
         uv="$(command -v uv)"
     elif [ -x "$bin_dir/uv" ]; then
@@ -54,6 +57,7 @@ main() {
         curl -fsSL https://astral.sh/uv/install.sh -o "$tmp/uv-install.sh"
         UV_INSTALL_DIR="$bin_dir" UV_NO_MODIFY_PATH=1 sh "$tmp/uv-install.sh" -q
         uv="$bin_dir/uv"
+        uv_ours=1
     fi
     [ -x "$uv" ] || die "uv was not installed"
     say "Using $("$uv" --version)"
@@ -73,9 +77,12 @@ main() {
     fi
 
     # 3. the app, with its own Python
+    py_dir="$("$uv" python dir)"
+    ls "$py_dir" 2>/dev/null | sort >"$tmp/py-before" || true
     say "Installing video-label and its packages with Python $PYTHON_VERSION (about a minute)"
     UV_TOOL_BIN_DIR="$bin_dir" "$uv" tool install --quiet --force --reinstall \
         --python "$PYTHON_VERSION" "$src"
+    ls "$py_dir" 2>/dev/null | sort >"$tmp/py-after" || true
     app="$bin_dir/video-label"
     [ -x "$app" ] || die "video-label was not installed in $bin_dir"
     "$app" --help >/dev/null || die "video-label was installed but does not start"
@@ -96,7 +103,19 @@ main() {
         "$HOME/.zshenv" "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; then
         UV_TOOL_BIN_DIR="$bin_dir" "$uv" tool update-shell -q >/dev/null 2>&1 \
             || warn "could not add $bin_dir to PATH; add it in your shell startup file"
+        path_files="$(grep -lsF "$bin_dir" "$HOME/.zshenv" "$HOME/.zshrc" "$HOME/.bashrc" \
+            "$HOME/.bash_profile" "$HOME/.profile" || true)"
     fi
+
+    # 6. receipt: what this installer added, merged with earlier runs (for uninstall.sh)
+    mkdir -p "$receipt_dir"
+    {
+        cat "$receipt_dir/install-receipt" 2>/dev/null || true
+        [ -n "$uv_ours" ] && echo "UV_INSTALLED=1"
+        comm -13 "$tmp/py-before" "$tmp/py-after" | sed 's/^/PYTHON_DIR=/'
+        for f in ${path_files:-}; do echo "PATH_FILE=$f"; done
+    } | sort -u >"$tmp/receipt"
+    mv "$tmp/receipt" "$receipt_dir/install-receipt"
 
     say "Installed: $app"
     case ":$PATH:" in
@@ -105,7 +124,7 @@ main() {
            echo "(or now: export PATH=\"$bin_dir:\$PATH\" && video-label)" ;;
     esac
     echo "The app opens on http://127.0.0.1:8765/. Update: run this installer again."
-    echo "Uninstall: uv tool uninstall video-label"
+    echo "Uninstall: curl -fsSL https://raw.githubusercontent.com/$REPO/main/uninstall.sh | sh"
 }
 
 main "$@"

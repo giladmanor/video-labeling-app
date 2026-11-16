@@ -67,7 +67,9 @@ these seed labels:
 ## 3. Install and run
 
 See the README. The one-line installer is [install.sh](../install.sh): it installs uv, the app
-with its own Python, and (if ffmpeg is not on `PATH`) the static ffmpeg build of §3.1. The command `video-label` starts a local server on `127.0.0.1:8765` and
+with its own Python, and (if ffmpeg is not on `PATH`) the static ffmpeg build of §3.1. It lists
+what it added in `~/.local/share/video-label/install-receipt`; [uninstall.sh](../uninstall.sh)
+removes those things, and the workspace and Keychain key only on request. The command `video-label` starts a local server on `127.0.0.1:8765` and
 opens the browser. All screens (setup, videos, labeling, export) are pages of this local app.
 
 Commands:

@@ -2,6 +2,29 @@
 
 A local macOS app for labeling events in videos quickly and with frame accuracy.
 
+## TL;DR
+
+Install:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/giladmanor/video-labeling-app/main/install.sh | sh
+```
+
+Run (the first time, open a new terminal or load the new `PATH` first):
+
+```sh
+source ~/.zshenv   # first time only; with bash: source ~/.bashrc
+video-label        # opens http://127.0.0.1:8765/
+```
+
+Uninstall:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/giladmanor/video-labeling-app/main/uninstall.sh | sh
+```
+
+See [Install](#install), [Run](#run), and [Uninstall](#uninstall) for details.
+
 A vision-language model looks at frames of each video and proposes candidate events: the app
 prepares a directory of frames and instructions, a model session that can read it (for example
 Claude) writes the candidates to a JSON file, and the app imports it. A person then reviews each candidate in a browser-based labeling screen:
@@ -51,7 +74,7 @@ The installer:
 
 Then open a new terminal and run `video-label`.
 
-To update, run the same line again. To uninstall: `uv tool uninstall video-label`.
+To update, run the same line again. To remove the app, see [Uninstall](#uninstall).
 
 Options, as variables in front of `sh`:
 
@@ -60,6 +83,34 @@ Options, as variables in front of `sh`:
 - `VIDEO_LABEL_NO_MODIFY_PATH=1`: do not change the shell startup files.
 
 For example: `curl -fsSL …/install.sh | VIDEO_LABEL_REF=v0.2.0 sh`.
+
+### Uninstall
+
+In a terminal:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/giladmanor/video-labeling-app/main/uninstall.sh | sh
+```
+
+The uninstaller removes:
+
+1. the app, its packages, and the static ffmpeg build;
+2. uv, its cache, its Python downloads, and the `PATH` line, if the installer installed uv.
+   If uv was there before, it stays, and only the Python that the installer downloaded is
+   removed. If other uv tools are installed, uv and its Python downloads stay; run the
+   uninstaller again after you remove those tools.
+3. on request, your data: the workspace `~/video-labeling` (playback copies, labels, exports) and the
+   xAI key in the Keychain. The uninstaller asks first. The default is to keep the data.
+
+The installer lists what it added in `~/.local/share/video-label/install-receipt`. The
+uninstaller removes only those things.
+
+Options, as variables in front of `sh`:
+
+- `VIDEO_LABEL_REMOVE_DATA=1` or `0`: remove or keep the data without asking.
+- `VIDEO_LABEL_WORKSPACE=<directory>`: the workspace to remove, if it is not the default.
+
+Your video libraries are never removed.
 
 ### Install for development
 
