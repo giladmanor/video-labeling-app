@@ -24,6 +24,8 @@ curl -fsSL https://raw.githubusercontent.com/giladmanor/video-labeling-app/main/
 ```
 
 See [Install](#install), [Run](#run), and [Uninstall](#uninstall) for details.
+The software comes as is, with no warranty; you use it at your own risk (see
+[Disclaimer](#disclaimer)).
 
 A vision-language model looks at frames of each video and proposes candidate events: the app
 prepares a directory of frames and instructions, a model session that can read it (for example
@@ -187,6 +189,17 @@ only from the command line: `video-label set-key` stores an xAI key in the macOS
 Videos stay on your computer. The app sends nothing to a model service: you give the
 prepared frames to a model session yourself. Make sure that you are allowed to send the frames of
 your videos to a third party before you do.
+
+## Disclaimer
+
+This software is provided "as is", without warranty of any kind, express or implied. This
+includes the installer and the uninstaller. There is no warranty that the software, its
+installation, or its removal works correctly, is fit for any purpose, or has no effect on your
+computer, your files, or your data. You use, install, and remove it at your own risk, and you
+alone are responsible for how you use it and for its results, including the labels and
+exports that it makes and the frames that you send to a model service. Back up your data.
+As far as the law allows, the author is not liable for any damage or loss that comes from
+the software or its use. The [License](LICENSE) has the full terms ("No Liability").
 
 ## License
 
