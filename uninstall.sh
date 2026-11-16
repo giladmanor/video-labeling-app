@@ -39,7 +39,13 @@ remove_path_line() {
         { printf "%s", held; held = ""; print }
         END { printf "%s", held }
     ' "$1" >"$1.video-label-tmp" && mv "$1.video-label-tmp" "$1"
-    say "Removed the PATH line from $1"
+    # uv creates the file when it is missing; a file with only blank lines left goes too.
+    if grep -q '[^[:space:]]' "$1"; then
+        say "Removed the PATH line from $1"
+    else
+        rm -f "$1"
+        say "Removed the PATH line and the now empty $1"
+    fi
 }
 
 main() {
