@@ -363,7 +363,8 @@ last frame (`(end_frame + 1) / fps`), so one segment ends where the next starts.
 ## 9. Things to know when you train on the export
 
 1. **The model selects most positives.** Events that the model misses are rare in the export.
-   Use `P` for missed events, and fully watch some videos to measure what the model misses.
+   Use `P` for missed events, and fully watch some videos to measure what the model misses
+   (README, "Test videos": label a few videos fully, with no suggestions).
 2. **The class balance is not the real one.** People watch mostly the time near suggestions,
    so the export has more positives than the real videos. Choose thresholds on fully watched
    videos.

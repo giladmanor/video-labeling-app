@@ -160,6 +160,27 @@ video-label import-prelabel candidates.json
 
 The file format is in [docs/prelabel-prompt.md](docs/prelabel-prompt.md).
 
+### Test videos: label a few videos fully, with no suggestions
+
+Most labels come from time near the model's suggestions. Labels like these are biased: they
+miss events that the model also misses, and they have more positives than the real videos.
+To get an honest test set, label a few videos with no suggestions at all:
+
+1. Choose a few videos at random, before you pre-label anything. Do not use "Export for
+   prelabeling" or `import-prelabel` on them. They can be labeled as soon as they have a
+   playback copy.
+2. Open each one and watch all of it, from start to end, at 4x or slower. Hold the key of an
+   event label while the event plays, or set its edges with `I` / `O`. The timeline shows the
+   watched time; `W` plays the next part that you did not watch.
+3. Press `Enter` when the full video is watched: the Watched column of the Videos page shows 100%.
+4. Write down the video IDs (the first column on the Videos page) and give them to the person
+   who trains the model. In the export, these are the `parent_video_id` values. Use these videos
+   only for the test set, and to measure what the model misses. Keep all their clips in the
+   test set, because clips of one video must not be in two splits.
+
+Start with about one video in five. The export does not mark these videos yet (the `audit`
+column is always 0), so the list of IDs is the only record.
+
 ### Other commands
 
 ```sh
