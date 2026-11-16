@@ -108,7 +108,7 @@ def test_events_count_only_when_watched():
     cfg = windows.CONFIGS["causal-2s"]
     lab = _label([seg(10, 19), seg(60, 69), seg(80, 89, label=0, origin="grok_rejected")], [[0, 39]])
     s = windows.summarize([lab], cfg)
-    assert s["phone_events"] == 1 and s["hard_negatives"] == 0
+    assert s["events"] == 1 and s["hard_negatives"] == 0
 
 
 def test_manual_prelabel_checks_and_merges():
@@ -129,3 +129,50 @@ def test_clip_segments_cover_the_clip():
     lab = _label([seg(20, 29), seg(35, 60, label=-1, origin="unsure")], [[10, 49]])
     out = [(s["start_frame"], s["end_frame"], s["label"]) for s in clip_segments(lab, 10, 49)]
     assert out == [(0, 9, 0), (10, 19, 1), (20, 24, 0), (25, 39, -1)]
+
+
+def test_label_config():
+    from video_label.workspace import SEED_LABELS
+    seed = [dict(x) for x in SEED_LABELS]
+    out = store.check_label_config([seed[2], {"value": 12, "name": "eating", "key": "E", "color": "#7048E8"}] + seed[:2])
+    assert [(x["value"], x["key"], x["color"]) for x in out] == [
+        (1, "1", "#d9480f"), (12, "e", "#7048e8"), (0, "0", "#2f9e44"), (-1, "u", "#868e96")]
+    ev = lambda **kw: {"value": 2, "name": "x", "key": "x", "color": "#123456", **kw}
+    for bad in (seed[:2], seed[1:], seed + [ev(value=100)], seed + [ev(name="phone")],
+                seed + [ev(name="bad name!")], seed + [ev(value=1)], seed + [ev(key="1")],
+                seed + [ev(key="a")], seed + [ev(key="u")], seed + [ev(key="xy")], seed + [ev(key="")],
+                seed + [ev(color="red")], seed + [ev(color="")]):
+        with pytest.raises(ValueError):
+            store.check_label_config(bad)
+
+
+def test_more_event_labels():
+    lab = store.new_label("v1", "t", 10.0, 100, None)
+    lab["segments"], lab["watched"] = [seg(10, 19), seg(30, 39, label=2)], [[0, 99]]
+    with pytest.raises(ValueError):
+        store.validate(lab)   # 2 is not a seed label
+    lab = store.validate(lab, {1, 2, 0, -1})
+    s = windows.summarize([lab], windows.CONFIGS["causal-2s"], {1: "phone", 2: "eating"})
+    assert s["events"] == 2 and s["events_by_label"] == {"phone": 1, "eating": 1}
+    assert s["positive_windows"] > 0
+
+
+def test_old_config_gets_label_keys_and_colors(tmp_path):
+    import json
+    from video_label.workspace import Workspace
+    (tmp_path / "config.json").write_text(json.dumps({"labels": [
+        {"value": 1, "name": "phone"}, {"value": 2, "name": "eating"},
+        {"value": 0, "name": "driving"}, {"value": -1, "name": "ignore"}]}))
+    labels = Workspace(tmp_path).settings.labels
+    assert [x["key"] for x in labels] == ["1", "2", "0", "u"]
+    assert [x["color"] for x in labels] == ["#d9480f", "#7048e8", "#2f9e44", "#868e96"]
+
+
+def test_page_has_every_element_that_app_js_uses():
+    # A missing element makes app.js stop at load, and then no button on any page works.
+    import re
+    from importlib import resources
+    static = resources.files("video_label").joinpath("static")
+    js, html = static.joinpath("app.js").read_text(), static.joinpath("index.html").read_text()
+    ids = set(re.findall(r'\$\("#([\w-]+)', js))
+    assert ids and not {i for i in ids if f'id="{i}"' not in html}

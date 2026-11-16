@@ -1,6 +1,8 @@
 """Processing jobs: scan the libraries, hash, probe, normalize, extract frames, pre-label.
 
-One background worker runs the steps video by video (docs/design.md).
+One background worker runs the steps video by video (docs/design.md). The app stops after
+the playback copy: pre-labels come from the Prepare prelabel page (manual.py). The frames and
+Grok steps run only from the CLI (`video-label process`) with an xAI key.
 The state is in the workspace database, so the jobs continue after a restart.
 """
 
@@ -66,7 +68,11 @@ def _done(row, step: str) -> bool:
 
 
 def process_video(ws: Workspace, video_id: str, client: grok.GrokClient | None) -> None:
-    """Run the missing steps of one video. Raises on error."""
+    """Run the missing steps of one video. Raises on error.
+
+    Without a Grok client the video is done after the normalize step (ready to label and to
+    prepare pre-label files by hand).
+    """
     s = ws.settings
     row = ws.video(video_id)
     src = ws.source_path(row)
@@ -83,14 +89,16 @@ def process_video(ws: Workspace, video_id: str, client: grok.GrokClient | None) 
                         width=p.width, height=p.height, duration_s=p.duration_s)
         row = ws.video(video_id)
     frames_dir = ws.frames_dir / video_id
+    if client is None:
+        shutil.rmtree(frames_dir, ignore_errors=True)   # frames made for Grok before; not used now
+        step = {"step": "normalized"} if row["step"] == "frames" else {}
+        ws.update_video(video_id, status="ok", error=None, **step)
+        return
     if not _done(row, "frames") or (not _done(row, "prelabeled") and not frames_dir.exists()):
         ffmpeg.extract_frames(ws.video_path(video_id), frames_dir, s.sample_fps, s.sample_height)
         ws.update_video(video_id, step="frames")
         row = ws.video(video_id)
     if not _done(row, "prelabeled"):
-        if client is None:
-            ws.update_video(video_id, status="waiting_key")
-            return
         result = prelabel.prelabel_video(
             client, video_id=video_id, frames=sorted(frames_dir.glob("*.jpg")),
             duration_s=row["duration_s"], sample_fps=s.sample_fps, chunk_s=s.chunk_s,
@@ -128,12 +136,6 @@ class Worker:
         self._stop.set()
         self._wake.set()
 
-    def _client(self) -> grok.GrokClient | None:
-        key = grok.get_key()
-        if not key:
-            return None
-        return grok.GrokClient(key, self.ws.settings.grok_base_url, self.ws.settings.grok_model)
-
     def _loop(self) -> None:
         while not self._stop.is_set():
             self._wake.wait()
@@ -141,9 +143,8 @@ class Worker:
             try:
                 self.message = "scanning libraries"
                 scan(self.ws)
-                # Videos that were running when the app stopped, or waited for a key.
+                # Videos that were running when the app stopped, or waited for a Grok key (old versions).
                 self.ws.execute("UPDATE videos SET status = 'pending' WHERE status IN ('running', 'waiting_key')")
-                client = self._client()
                 todo = self.ws.execute(
                     "SELECT video_id FROM videos WHERE status = 'pending' ORDER BY library, rel_path"
                 )
@@ -155,12 +156,10 @@ class Worker:
                     self.message = f"processing {vid}"
                     self.ws.update_video(vid, status="running")
                     try:
-                        process_video(self.ws, vid, client)
+                        process_video(self.ws, vid, None)
                     except Exception as e:  # one bad video must not stop the others
                         log.exception("video %s failed", vid)
                         self.ws.update_video(vid, status="error", error=str(e)[:500])
-                if client:
-                    client.close()
             except Exception:
                 log.exception("job loop failed")
             finally:

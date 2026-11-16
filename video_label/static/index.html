@@ -8,11 +8,15 @@
 </head>
 <body>
 <header>
-  <strong>video label</strong>
+  <strong class="logo" title="video label">🏷️</strong>
   <nav>
     <a href="#setup" data-view="setup">Setup</a>
     <a href="#jobs" data-view="jobs">Videos</a>
-    <a href="#label" data-view="label">Label</a>
+    <span id="cur-video" class="cur-video" hidden>
+      <span id="cur-name" class="cur-name mono" title="the selected video"></span>
+      <a href="#prelabel" data-view="prelabel">Prepare prelabel</a>
+      <a href="#label" data-view="label">Label</a>
+    </span>
   </nav>
   <span id="worker" class="muted"></span>
 </header>
@@ -39,16 +43,22 @@
         If you deny it, the scan finds no videos.</p>
     </div>
     <div class="card">
-      <h3>Grok (xAI API)</h3>
-      <p id="key-status"></p>
+      <h3>Labels</h3>
+      <table id="label-config" class="cfg">
+        <thead><tr><th>Key</th><th>Name</th><th>Color</th><th>Role</th><th>Value in the export</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
       <div class="row">
-        <input id="api-key" type="password" placeholder="xai-…" class="grow" autocomplete="off">
-        <button id="save-key">Test and save</button>
+        <button id="add-label">Add event label</button>
+        <button id="save-labels">Save labels</button>
+        <span id="labels-status" class="small muted"></span>
       </div>
-      <p class="muted">A grok.com or X Premium subscription does not give API access. Get a key from the team lead
-        (xAI console). The key is stored in the macOS Keychain.</p>
-      <label>Model <select id="model"></select></label>
-      <button id="save-model">Save</button>
+      <p class="muted small">The key is the keyboard shortcut on the labeling screen: it sets the label of the
+        selected segment. Use one character that is not already a key there (<span id="reserved-keys" class="mono"></span>).
+        The background label (0) is what watched time with no segment gets, and what a rejected suggestion becomes.
+        Ignore (−1) is not used for training. The first event label is the one that Accept, P, and Start/End make.
+        A new label gets a color that no other label uses; click the color to choose another one.
+        A label that is in use in a label file cannot be removed.</p>
     </div>
     <div class="card muted small">
       <div>Workspace: <span id="ws-path"></span></div>
@@ -57,20 +67,95 @@
   </section>
 
   <!-- Jobs / videos -->
-  <section id="view-jobs" class="view">
+  <section id="view-jobs" class="view" hidden>
     <div class="row">
       <h2 class="grow">Videos</h2>
       <button id="run-jobs">Scan and process</button>
-      <button id="export-jobs" class="b-export">Export…</button>
     </div>
     <table id="video-table">
       <thead><tr><th>Video</th><th>File</th><th>Length</th><th>Step</th><th>Status</th><th>Candidates</th><th>Watched</th><th>Label</th><th></th></tr></thead>
       <tbody></tbody>
     </table>
+
+    <div id="train-card" class="card">
+      <h3>Training data</h3>
+      <div id="train-total" class="step-title"></div>
+      <p class="small muted">Only watched time counts: you have seen it, so its labels are checked. Watched time with
+        no segment is <span data-label="0-name"></span>. Videos marked Skip are left out; Done is not needed.</p>
+      <table id="train-table" class="train">
+        <thead><tr><th>Label</th><th>Key</th><th>Value</th><th>Instances</th><th>Seconds</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div id="train-note" class="small muted"></div>
+      <div class="row" style="margin-top: 10px">
+        <button id="export-run" class="b-primary big">Export</button>
+        <span id="export-status" class="small"></span>
+      </div>
+      <div id="export-result" class="row wrap small" hidden>
+        Output directory <span id="export-path" class="mono"></span>
+        <button id="export-reveal">Show in Finder</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Prepare prelabel: a wizard for the selected video -->
+  <section id="view-prelabel" class="view" hidden>
+    <h2>Prepare prelabel</h2>
+    <div id="mp-done" class="card notice" hidden></div>
+    <div id="mp-again" class="row wrap again" hidden>
+      <button data-open="prepare">Prepare directory again</button>
+      <button data-open="instruction">Generate instruction again</button>
+      <button data-open="import">Import again</button>
+    </div>
+
+    <div id="mp-step-prepare" class="card step">
+      <h3>1. Prepare the frames for a labeling LLM</h3>
+      <div class="row wrap">
+        <button id="mp-prepare" class="b-primary big">Prepare directory</button>
+        <span id="mp-status" class="small muted"></span>
+        <span class="grow"></span>
+        <button id="mp-edit-readme" title="the instructions that the model reads">Edit README.md</button>
+      </div>
+      <p class="small muted">Writes the frames of the video and a README.md with the instructions into one directory.
+        A labeling LLM session that can read the directory (for example Claude) looks at every frame and writes
+        prelabels.json.</p>
+      <div id="mp-readme-box" hidden>
+        <div class="row wrap">
+          <label>Frames per second <input id="mp-fps" type="number" step="0.5" min="0.5" max="10" class="num"></label>
+          <label>Height (px) <input id="mp-height" type="number" step="1" min="64" class="num"></label>
+          <span id="mp-images" class="small muted"></span>
+        </div>
+        <h3>README.md for the model</h3>
+        <textarea id="mp-readme" rows="14" class="mono small"></textarea>
+        <div class="row">
+          <span class="small muted grow">The app fills in <span id="mp-placeholders" class="mono"></span> for each video.</span>
+          <button id="mp-reset-readme">Reset to the default instructions</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="mp-step-instruction" class="card step" hidden>
+      <div id="mp-summary" class="step-title"></div>
+      <div class="row wrap small muted">Directory <span id="mp-path" class="mono"></span>
+        <button id="mp-copy-path">Copy path</button><button id="mp-folder">Show in Finder</button></div>
+      <h3>2. Paste this instruction into the labeling LLM session (it must be able to read the directory)</h3>
+      <div id="mp-instruction" class="instruction mono small"></div>
+      <button id="mp-copy" class="b-primary">Copy instruction</button>
+    </div>
+
+    <div id="mp-step-import" class="card step" hidden>
+      <h3>3. When the model has written prelabels.json, import it</h3>
+      <div id="mp-answer" class="small"></div>
+      <div class="row" style="margin-top: 8px">
+        <label>Model name <input id="mp-model" placeholder="from the file, or type it"></label>
+        <button id="mp-import" class="b-export">Import as suggested events</button>
+        <span id="mp-import-status" class="small"></span>
+      </div>
+    </div>
   </section>
 
   <!-- Labeling -->
-  <section id="view-label" class="view">
+  <section id="view-label" class="view" hidden>
     <div id="label-empty" class="card">Choose a video on the <a href="#jobs">Videos</a> page.</div>
     <div id="label-main" hidden>
       <div class="topbar">
@@ -85,7 +170,6 @@
           <button data-act="random" class="b-watched" title="play a random unwatched part, for normal driving (B)">Random <kbd>B</kbd></button>
           <button data-act="done" class="b-done" title="mark the video done and open the next one (Enter)">Done <kbd>Enter</kbd></button>
           <button data-act="skip" title="skip the video; the note is the reason (Shift+S)">Skip <kbd>⇧S</kbd></button>
-          <button data-act="export" class="b-export" title="export the watched parts of all done videos">Export…</button>
           <button data-act="help" title="all keys (?)">?</button>
         </span>
       </div>
@@ -104,27 +188,23 @@
             <span id="speed-val" class="mono">1x</span>
           </label>
           <h3>Decide on the suggestion</h3>
-          <button data-act="accept" class="b-phone" title="accept: the suggestion becomes a phone segment, label 1 (A)">Accept → phone (1) <kbd>A</kbd></button>
-          <button data-act="reject" class="b-rejected" title="reject: the suggestion becomes a driving segment, label 0, a hard negative (R)">Reject → driving (0) <kbd>R</kbd></button>
-          <button data-act="unsure" class="b-unsure" title="unsure: the suggestion becomes an ignore segment, label −1, not used in training (U)">Unsure → ignore (−1) <kbd>U</kbd></button>
+          <button data-act="accept" class="b-phone" title="accept: the suggestion becomes a segment of the first event label (A)">Accept → <span data-label="event"></span> <kbd>A</kbd></button>
+          <button data-act="reject" class="b-rejected" title="reject: the suggestion becomes a background segment, label 0, a hard negative (R)">Reject → <span data-label="0"></span> <kbd>R</kbd></button>
+          <button data-act="unsure" class="b-unsure" title="unsure: the suggestion becomes an ignore segment, label −1, not used in training (U)">Unsure → <span data-label="-1"></span> <kbd>U</kbd></button>
         </aside>
         <div class="player-wrap">
           <video id="player" preload="auto" playsinline></video>
         </div>
         <aside class="side" id="side-right">
-          <h3>New phone segment</h3>
-          <button data-act="hold" class="b-phone-outline" title="hold down while the video plays to mark phone use (hold P)">Hold: phone (1) <kbd>P</kbd></button>
+          <h3>New segment</h3>
           <div class="row2">
-            <button data-act="start" class="b-phone-outline" title="set the start of the selected segment, or of a new phone segment (I)">Start <kbd>I</kbd></button>
-            <button data-act="end" class="b-phone-outline" title="set the end of the selected segment, or of a new phone segment (O)">End <kbd>O</kbd></button>
+            <button data-act="start" class="b-phone-outline" title="set the start of the selected segment, or of a new event segment (I)">Start segment <kbd>I</kbd></button>
+            <button data-act="end" class="b-phone-outline" title="set the end of the selected segment, or of a new event segment (O)">End segment <kbd>O</kbd></button>
           </div>
-          <h3>Selected segment <span class="keyhint">keys 1 · 0 · U</span></h3>
+          <div class="row2" id="hold-btns"></div>
+          <h3>Selected segment <span class="keyhint">label keys</span></h3>
           <div id="sel-info" class="small muted">nothing selected</div>
-          <div class="row3">
-            <button data-act="set-phone" class="b-phone" title="set the label of the selected segment to phone, 1 (key 1)">phone (1)</button>
-            <button data-act="set-driving" class="b-driving" title="set the label of the selected segment to driving, 0 (key 0)">driving (0)</button>
-            <button data-act="set-ignore" class="b-unsure" title="set the label of the selected segment to ignore, −1 (key U)">ignore (−1)</button>
-          </div>
+          <div class="row3" id="set-label-btns"></div>
           <div class="row2">
             <button data-act="delete" title="delete the selected segment (Delete)">Delete <kbd>Del</kbd></button>
             <button data-act="undo" title="undo (⌘Z)">Undo <kbd>⌘Z</kbd></button>
@@ -144,10 +224,7 @@
         <div class="legend-colors muted">
           <span><i class="sw sw-cand"></i>suggested (fainter = less confident)</span>
           <span><i class="sw sw-unusable"></i>unusable video</span>
-          <span><i class="sw sw-phone"></i>phone (1)</span>
-          <span><i class="sw sw-driving"></i>driving (0)</span>
-          <span><i class="sw sw-rejected"></i>driving (0), rejected suggestion</span>
-          <span><i class="sw sw-unsure"></i>ignore (−1)</span>
+          <span id="legend-labels" class="legend-colors"></span>
           <span><i class="sw sw-watched"></i>watched</span>
           <span>no color = unknown (not watched, not exported)</span>
         </div>
@@ -158,16 +235,6 @@
 
 <div id="toast" hidden></div>
 
-<div id="export-dlg" class="overlay" hidden>
-  <div class="card">
-    <h3>Export</h3>
-    <div id="export-msg"></div>
-    <div class="row" style="margin-top: 10px">
-      <button id="export-reveal" hidden>Show in Finder</button>
-      <button id="export-close">Close</button>
-    </div>
-  </div>
-</div>
 
 <div id="help" class="overlay" hidden>
   <div class="card">
@@ -178,24 +245,24 @@
       <tr><td><kbd>Shift</kbd>+<kbd>←</kbd> <kbd>→</kbd></td><td>one second back / forward</td></tr>
       <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>slower / faster (0.5x to 4x)</td></tr>
       <tr><td><kbd>N</kbd> / <kbd>Shift</kbd>+<kbd>N</kbd></td><td>next / previous suggested event, played with 2 s before and 1 s after</td></tr>
-      <tr><td><kbd>A</kbd></td><td>accept the suggestion (phone)</td></tr>
-      <tr><td><kbd>R</kbd></td><td>reject the suggestion (driving, hard negative)</td></tr>
+      <tr><td><kbd>A</kbd></td><td>accept the suggestion (<span data-label="event"></span>)</td></tr>
+      <tr><td><kbd>R</kbd></td><td>reject the suggestion (<span data-label="0"></span>, hard negative)</td></tr>
       <tr><td><kbd>U</kbd></td><td>ignore, −1 (the suggestion, or the selected segment)</td></tr>
-      <tr><td><kbd>1</kbd> / <kbd>0</kbd></td><td>set the selected segment to phone (1) / driving (0)</td></tr>
-      <tr><td><kbd>P</kbd> (hold)</td><td>mark phone while the key is down</td></tr>
-      <tr><td><kbd>I</kbd> / <kbd>O</kbd></td><td>set the start / end of the selected segment (or of a new phone segment)</td></tr>
+      <tbody id="help-label-keys"></tbody>
+      <tr><td><kbd>P</kbd> (hold)</td><td>mark <span data-label="event-name"></span> while the key is down (the Hold buttons mark any label)</td></tr>
+      <tr><td><kbd>I</kbd> / <kbd>O</kbd></td><td>set the start / end of the selected segment (or of a new event segment)</td></tr>
       <tr><td><kbd>Delete</kbd></td><td>delete the selected segment</td></tr>
       <tr><td><kbd>T</kbd> then <kbd>1</kbd>–<kbd>8</kbd></td><td>toggle a tag on the selected segment</td></tr>
       <tr><td><kbd>W</kbd></td><td>play the next unwatched part</td></tr>
-      <tr><td><kbd>B</kbd></td><td>play a random unwatched part (normal driving)</td></tr>
+      <tr><td><kbd>B</kbd></td><td>play a random unwatched part (for normal examples)</td></tr>
       <tr><td><kbd>⌘</kbd>+<kbd>Z</kbd></td><td>undo</td></tr>
       <tr><td><kbd>Enter</kbd></td><td>mark the video done, open the next one (click the status to reopen)</td></tr>
       <tr><td><kbd>Shift</kbd>+<kbd>S</kbd></td><td>skip the video (the note is the reason)</td></tr>
       <tr><td><kbd>Esc</kbd></td><td>clear the selection</td></tr>
     </table>
-    <p class="small muted">The start of a phone segment is the first frame where the event is visible:
-      the phone is in view in the hand, or the hand clearly moves to take it.</p>
-    <p class="small muted">Only watched time is exported. Watched time with no segment becomes "driving".</p>
+    <p class="small muted">The start of an event segment is the first frame where the event is visible
+      (for phone: the phone is in view in the hand, or the hand clearly moves to take it).</p>
+    <p class="small muted">Only watched time is exported. Watched time with no segment becomes "<span data-label="0-name"></span>".</p>
     <button id="help-close">Close</button>
   </div>
 </div>

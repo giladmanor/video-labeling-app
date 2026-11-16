@@ -176,7 +176,13 @@ def prelabel_video(
 
     with ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:
         results = list(pool.map(run_chunk, chunks))
+    return assemble(results, video_id=video_id, model=client.model, prompt_version=prompt_version,
+                    sample_fps=sample_fps, duration_s=duration_s)
 
+
+def assemble(results: list[dict], *, video_id: str, model: str, prompt_version: str,
+             sample_fps: float, duration_s: float) -> dict:
+    """The pre-label file content from chunk results: {t0, t1, usage, and answer or error}."""
     ok = [r for r in results if "answer" in r]
     usage: dict[str, int] = {}
     for r in results:
@@ -185,8 +191,8 @@ def prelabel_video(
     covered = merge_ranges([{"start_s": r["t0"], "end_s": r["t1"]} for r in ok], gap_s=1 / sample_fps + 1e-6)
     return {
         "video_id": video_id,
-        "run_id": run_id_for(client.model, prompt_version),
-        "model": client.model,
+        "run_id": run_id_for(model, prompt_version),
+        "model": model,
         "prompt_version": prompt_version,
         "sample_fps": sample_fps,
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),

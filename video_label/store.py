@@ -7,12 +7,19 @@ both included. Watched ranges use the same convention.
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .workspace import write_json_atomic
+from .workspace import SEED_LABELS, write_json_atomic
 
-LABELS = {1: "phone", 0: "driving", -1: "unsure"}
+SEED_VALUES = {x["value"] for x in SEED_LABELS}
+LABEL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+COLOR_RE = re.compile(r"^#[0-9a-f]{6}$")
+# Keys of the labeling screen that a label cannot use (docs/design.md, keys). The ignore label
+# may use "u": U already makes a segment ignore.
+RESERVED_KEYS = set(" anriowbtsp?[]")
 ORIGINS = {"grok_accepted", "grok_rejected", "manual", "watched", "unsure"}
 STATUSES = {"todo", "done", "skip"}
 DECISIONS = {"accepted", "rejected", "unsure"}
@@ -44,8 +51,8 @@ def load(path: Path) -> dict | None:
     return json.loads(path.read_text()) if path.exists() else None
 
 
-def save(path: Path, label: dict) -> dict:
-    label = validate(label)
+def save(path: Path, label: dict, values: set[int] = SEED_VALUES) -> dict:
+    label = validate(label, values)
     label["updated_at"] = now()
     write_json_atomic(path, label)
     return label
@@ -64,8 +71,55 @@ def merge_ranges(ranges: list[list[int]], n_frames: int) -> list[list[int]]:
     return out
 
 
-def validate(label: dict) -> dict:
-    """Check a label sent by the page. Raises ValueError. Returns a cleaned copy."""
+def check_label_config(labels: list[dict]) -> list[dict]:
+    """Check the label list of the Setup page. Raises ValueError. Returns a cleaned copy.
+
+    0 (background) and -1 (ignore) must exist; event labels use the values 1 to 99.
+    Each label has one keyboard key (one character, not a key of the labeling screen) and a
+    color ("#rrggbb").
+    """
+    out, names, keys = [], set(), set()
+    for x in labels:
+        value, name = x.get("value"), str(x.get("name", "")).strip()
+        key = str(x.get("key", "")).strip().lower()
+        color = str(x.get("color", "")).strip().lower()
+        if isinstance(value, bool) or not isinstance(value, int) or not -1 <= value <= 99:
+            raise ValueError(f"label value {value!r} is not -1, 0, or 1 to 99")
+        if not LABEL_NAME_RE.match(name):
+            raise ValueError(f"label name {name!r}: use 1 to 32 letters, digits, _ or -")
+        if name in names:
+            raise ValueError(f"label name {name!r} is used twice")
+        if len(key) != 1 or not key.isprintable():
+            raise ValueError(f"label {name}: the key must be one character")
+        if key in RESERVED_KEYS and not (key == "u" and value == -1):
+            raise ValueError(f"label {name}: the key {key!r} is already a key of the labeling screen")
+        if key in keys:
+            raise ValueError(f"the key {key!r} is used twice")
+        if not COLOR_RE.match(color):
+            raise ValueError(f"label {name}: the color must be #rrggbb")
+        names.add(name)
+        keys.add(key)
+        out.append({"value": value, "name": name, "key": key, "color": color})
+    values = [x["value"] for x in out]
+    if len(set(values)) != len(values):
+        raise ValueError("each label value can be used only once")
+    if 0 not in values or -1 not in values:
+        raise ValueError("the labels 0 (background) and -1 (ignore) are required")
+    if not any(v >= 1 for v in values):
+        raise ValueError("add at least one event label")
+    return sorted(out, key=lambda x: x["value"] if x["value"] >= 1 else 1000 - x["value"])   # events, 0, -1
+
+
+def used_values(labels: Iterable[dict]) -> set[int]:
+    """The segment label values used in the given label files."""
+    return {s["label"] for label in labels for s in label["segments"]}
+
+
+def validate(label: dict, values: set[int] = SEED_VALUES) -> dict:
+    """Check a label sent by the page. Raises ValueError. Returns a cleaned copy.
+
+    `values` are the label values of the workspace (Setup page).
+    """
     n = int(label["n_frames"])
     if label.get("status") not in STATUSES:
         raise ValueError(f"bad status {label.get('status')!r}")
@@ -74,7 +128,7 @@ def validate(label: dict) -> dict:
         a, b = int(s["start_frame"]), int(s["end_frame"])
         if not 0 <= a <= b < n:
             raise ValueError(f"segment {a}-{b} is outside 0-{n - 1}")
-        if s.get("label") not in LABELS:
+        if isinstance(s.get("label"), bool) or s.get("label") not in values:
             raise ValueError(f"bad label {s.get('label')!r}")
         if s.get("origin") not in ORIGINS:
             raise ValueError(f"bad origin {s.get('origin')!r}")

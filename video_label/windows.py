@@ -27,10 +27,10 @@ CONFIGS = {
 
 
 def window_labels(labels: list[int | None], fps: float, cfg: WindowConfig) -> list[int]:
-    """Labels (1, 0, -1 = ignore) of the causal windows that fit inside one watched range.
+    """Labels (1 = an event, 0, -1 = ignore) of the causal windows that fit inside one watched range.
 
     A window ends at frame e (excluded) and starts at e - L. Its label comes from the
-    last end_part_s of the window (the "now" part).
+    last end_part_s of the window (the "now" part). All event labels (1 and up) count as positive.
     """
     length = max(1, round(cfg.length_s * fps))
     stride = max(1, round(cfg.stride_s * fps))
@@ -48,7 +48,7 @@ def window_labels(labels: list[int | None], fps: float, cfg: WindowConfig) -> li
             f += 1
         for e in range(start + length, f + 1, stride):
             tail = labels[e - end_part:e]
-            pos = sum(1 for v in tail if v == 1) / len(tail)
+            pos = sum(1 for v in tail if v >= 1) / len(tail)
             if pos >= cfg.positive_min:
                 out.append(1)
             elif all(v == 0 for v in tail):
@@ -58,9 +58,11 @@ def window_labels(labels: list[int | None], fps: float, cfg: WindowConfig) -> li
     return out
 
 
-def summarize(labels_by_video: list[dict], cfg: WindowConfig) -> dict:
-    """Counts for a list of label files."""
+def summarize(labels_by_video: list[dict], cfg: WindowConfig, names: dict[int, str] | None = None) -> dict:
+    """Counts for a list of label files. `names` maps event values to names for events_by_label."""
+    names = names or {}
     pos = neg = ign = events = hard_neg = short_parts = 0
+    by_label: dict[str, int] = {}
     watched_s = 0.0
     for label in labels_by_video:
         fps = float(label["fps"])
@@ -71,7 +73,11 @@ def summarize(labels_by_video: list[dict], cfg: WindowConfig) -> dict:
         # Only watched frames are exported, so a segment counts only if a person saw part of it.
         seen = [s for s in label["segments"]
                 if any(a <= s["end_frame"] and s["start_frame"] <= b for a, b in label["watched"])]
-        events += sum(1 for s in seen if s["label"] == 1)
+        for s in seen:
+            if s["label"] >= 1:
+                events += 1
+                key = names.get(s["label"], str(s["label"]))
+                by_label[key] = by_label.get(key, 0) + 1
         hard_neg += sum(1 for s in seen if s["origin"] == "grok_rejected")
         min_len = math.ceil(cfg.length_s * fps)
         for a, b in label["watched"]:
@@ -82,7 +88,8 @@ def summarize(labels_by_video: list[dict], cfg: WindowConfig) -> dict:
     return {
         "config": cfg.name,
         "source_videos": len(labels_by_video),
-        "phone_events": events,
+        "events": events,
+        "events_by_label": by_label,
         "positive_windows": pos,
         "negative_windows": neg,
         "ignored_windows": ign,

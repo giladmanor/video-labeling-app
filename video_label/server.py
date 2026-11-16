@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from contextlib import asynccontextmanager
@@ -11,13 +12,15 @@ from pathlib import Path
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from . import __version__, export, ffmpeg, grok, store, windows
+from . import __version__, export, ffmpeg, manual, store, windows
 from .jobs import Worker
 from .prelabel import TAGS
-from .workspace import Workspace
+from .workspace import LABEL_PALETTE, Workspace
 
-EDITABLE_SETTINGS = {"labeler", "grok_model", "sample_fps", "chunk_s", "chunk_overlap_s", "grok_parallel"}
+ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
+EDITABLE_SETTINGS = {"labeler", "sample_fps", "chunk_s", "chunk_overlap_s"}
 
 
 def create_app(ws: Workspace, start_worker: bool = True) -> FastAPI:
@@ -33,6 +36,9 @@ def create_app(ws: Workspace, start_worker: bool = True) -> FastAPI:
     app = FastAPI(title="video-label", version=__version__, lifespan=lifespan)
     static_dir = resources.files("video_label").joinpath("static")
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+    # DNS rebinding: a web site can point its own name at 127.0.0.1 and then read this server
+    # as the same origin (also with the custom header). Only accept our own host names.
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 
     @app.middleware("http")
     async def require_app_header(request: Request, call_next):
@@ -41,11 +47,23 @@ def create_app(ws: Workspace, start_worker: bool = True) -> FastAPI:
         if request.url.path.startswith("/api/") and request.method not in ("GET", "HEAD"):
             if request.headers.get("x-video-label") != "1":
                 return JSONResponse({"detail": "missing X-Video-Label header"}, status_code=403)
-        return await call_next(request)
+        response = await call_next(request)
+        # The page, app.js, and style.css change with the app version: the browser must ask each
+        # time (a 304 when unchanged) and never mix a cached old file with a new one.
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+    def _versioned(html: str) -> str:
+        # app.js?v=<content hash>: a browser never uses a cached copy of an older version.
+        for name in ("app.js", "style.css"):
+            v = hashlib.sha256(static_dir.joinpath(name).read_bytes()).hexdigest()[:12]
+            html = html.replace(f"/static/{name}", f"/static/{name}?v={v}")
+        return html
 
     @app.get("/", response_class=HTMLResponse)
     def index():
-        return static_dir.joinpath("index.html").read_text()
+        return _versioned(static_dir.joinpath("index.html").read_text())
 
     # --- setup ---
 
@@ -59,10 +77,11 @@ def create_app(ws: Workspace, start_worker: bool = True) -> FastAPI:
             "version": __version__,
             "workspace": str(ws.root),
             "settings": ws.settings.__dict__,
-            "key_present": bool(grok.get_key()),
             "ffmpeg": ff,
             "worker": {"message": worker.message, "current": worker.current},
             "tags": TAGS,
+            "reserved_keys": "".join(sorted(store.RESERVED_KEYS)),
+            "label_palette": LABEL_PALETTE,
         }
 
     @app.post("/api/settings")
@@ -73,6 +92,21 @@ def create_app(ws: Workspace, start_worker: bool = True) -> FastAPI:
             setattr(ws.settings, k, type(getattr(ws.settings, k))(v))
         ws.save_settings()
         return ws.settings.__dict__
+
+    @app.post("/api/settings/labels")
+    def set_labels(data: dict = Body(...)):
+        try:
+            labels = store.check_label_config(data.get("labels") or [])
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        removed = set(ws.label_names()) - {x["value"] for x in labels}
+        in_use = removed & store.used_values(store.load(p) for p in ws.labels_dir.glob("*.json"))
+        if in_use:
+            names = ", ".join(ws.label_names()[v] for v in sorted(in_use))
+            raise HTTPException(409, f"labels in use in label files cannot be removed: {names}")
+        ws.settings.labels = labels
+        ws.save_settings()
+        return labels
 
     @app.post("/api/libraries")
     def add_library(data: dict = Body(...)):
@@ -105,35 +139,6 @@ def create_app(ws: Workspace, start_worker: bool = True) -> FastAPI:
             return {"path": None}  # the user pressed Cancel
         return {"path": proc.stdout.strip().rstrip("/") or "/"}
 
-    @app.post("/api/grok/key")
-    def set_key(data: dict = Body(...)):
-        key = str(data.get("key", "")).strip()
-        if not key:
-            raise HTTPException(400, "empty key")
-        client = grok.GrokClient(key, ws.settings.grok_base_url, ws.settings.grok_model)
-        try:
-            models = client.models()
-        except grok.GrokError as e:
-            raise HTTPException(400, f"the key does not work: {e}")
-        finally:
-            client.close()
-        grok.set_key(key)
-        worker.wake()
-        return {"models": models}
-
-    @app.get("/api/grok/models")
-    def grok_models():
-        key = grok.get_key()
-        if not key:
-            raise HTTPException(400, "no API key")
-        client = grok.GrokClient(key, ws.settings.grok_base_url, ws.settings.grok_model)
-        try:
-            return {"models": client.models()}
-        except grok.GrokError as e:
-            raise HTTPException(502, str(e))
-        finally:
-            client.close()
-
     # --- jobs and videos ---
 
     def _label_info(video_id: str) -> dict:
@@ -155,7 +160,7 @@ def create_app(ws: Workspace, start_worker: bool = True) -> FastAPI:
             out.append({
                 "video_id": r["video_id"], "file": r["rel_path"], "library": r["library"],
                 "step": r["step"], "status": r["status"], "error": r["error"],
-                "duration_s": r["duration_s"], "candidates": n_candidates, **_label_info(r["video_id"]),
+                "duration_s": r["duration_s"], "candidates": n_candidates, "prelabel_run": r["prelabel_run"], **_label_info(r["video_id"]),
             })
         return out
 
@@ -208,9 +213,14 @@ def create_app(ws: Workspace, start_worker: bool = True) -> FastAPI:
             raise HTTPException(409, "set your labeler name on the Setup page first")
         label["labeler"] = label.get("labeler") or ws.settings.labeler
         try:
-            return store.save(ws.label_path(video_id), label)
+            return store.save(ws.label_path(video_id), label, set(ws.label_names()))
         except (ValueError, KeyError, TypeError) as e:
             raise HTTPException(400, str(e))
+
+    @app.get("/api/export/stats")
+    def export_stats():
+        """The watched time that an export would hold now (the Videos page)."""
+        return export.stats(ws)
 
     @app.post("/api/export")
     def run_export():
@@ -223,30 +233,60 @@ def create_app(ws: Workspace, start_worker: bool = True) -> FastAPI:
 
     @app.post("/api/export/reveal")
     def reveal_export(data: dict = Body(...)):
-        """Show an export folder in the Finder."""
+        """Show an export or manual pre-label folder in the Finder."""
         path = Path(str(data.get("path", ""))).resolve()
-        if ws.exports_dir.resolve() not in path.parents or not path.is_dir():
+        roots = (ws.exports_dir.resolve(), ws.manual_dir.resolve())
+        if not any(r in path.parents for r in roots) or not path.is_dir():
             raise HTTPException(400, "not an export folder")
         subprocess.run(["open", str(path)], check=False)
         return {"ok": True}
 
+    # --- manual pre-labeling (a directory of frames and a README.md for a labeling LLM) ---
+
+    @app.get("/api/manual")
+    def manual_sets(video_id: str | None = None):
+        return {"defaults": manual.defaults(ws), "sets": manual.list_sets(ws, video_id)}
+
+    @app.post("/api/manual/prepare")
+    def manual_prepare(data: dict = Body(...)):
+        try:
+            return manual.prepare(
+                ws, str(data.get("video_id", "")), sample_fps=float(data["sample_fps"]),
+                height=int(data["height"]), readme=str(data.get("readme", "")),
+            )
+        except (KeyError, TypeError, ValueError) as e:   # ManualError is a ValueError
+            raise HTTPException(400, str(e))
+        except ffmpeg.FFmpegError as e:
+            raise HTTPException(500, str(e))
+
+    @app.get("/api/manual/{name}")
+    def manual_set(name: str):
+        try:
+            return manual.describe(ws, name)
+        except manual.ManualError as e:
+            raise HTTPException(404, str(e))
+
+    @app.post("/api/manual/{name}/import")
+    def manual_import(name: str, data: dict = Body(...)):
+        try:
+            return manual.import_set(ws, name, str(data.get("model", "")))
+        except manual.ManualError as e:
+            raise HTTPException(400, str(e))
+
     @app.get("/api/summary")
     def summary(video_id: str | None = None):
         cfg = windows.CONFIGS[ws.settings.window_config]
-        done, current = [], None
+        # All watched time counts, as in the export; skipped videos do not.
+        all_labels, current = [], None
         for p in sorted(ws.labels_dir.glob("*.json")):
             label = store.load(p)
             if label["video_id"] == video_id:
                 current = label
-            if label["status"] == "done":
-                done.append(label)
-        if current is not None and current["status"] != "done":
-            all_labels = done + [current]
-        else:
-            all_labels = done
+            if label["status"] != "skip":
+                all_labels.append(label)
         return {
-            "all": windows.summarize(all_labels, cfg),
-            "video": windows.summarize([current], cfg) if current else None,
+            "all": windows.summarize(all_labels, cfg, ws.label_names()),
+            "video": windows.summarize([current], cfg, ws.label_names()) if current else None,
         }
 
     return app

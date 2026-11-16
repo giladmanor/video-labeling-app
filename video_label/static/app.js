@@ -27,21 +27,173 @@ function fmtTime(s) {
 
 // ---------------------------------------------------------------- routing
 
+// The Prepare prelabel and Label tabs belong to the selected video and show only when there is one.
+let CUR = null;   // {video_id, file}
+
 function route() {
-  const [view, arg] = (location.hash.slice(1) || "jobs").split("/");
+  let [view, arg] = (location.hash.slice(1) || "jobs").split("/");
+  if (view === "prelabel" || view === "label") {
+    arg = arg || CUR?.video_id;
+    if (!arg) { flash("Choose a video first"); location.hash = "#jobs"; return; }
+    selectVideo(arg);
+  }
   document.querySelectorAll(".view").forEach((v) => (v.hidden = v.id !== `view-${view}`));
   document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("active", a.dataset.view === view));
   document.body.classList.toggle("labeling", view === "label");
   if (view === "setup") loadSetup();
   if (view === "jobs") loadJobs();
-  if (view === "label") openVideo(arg || L.videoId);
+  if (view === "prelabel") loadPrelabel(arg);
+  if (view === "label") openVideo(arg);
 }
 window.addEventListener("hashchange", route);
+
+/** Show the video in the top bar and point its two tabs at it. */
+async function selectVideo(videoId) {
+  if (CUR?.video_id !== videoId) CUR = { video_id: videoId, file: "" };
+  for (const v of ["prelabel", "label"]) document.querySelector(`nav a[data-view="${v}"]`).href = `#${v}/${videoId}`;
+  $("#cur-video").hidden = false;
+  if (!CUR.file) {
+    const row = (await api("/api/videos")).find((v) => v.video_id === videoId);
+    if (CUR.video_id !== videoId) return;
+    CUR.file = row?.file ?? videoId;
+  }
+  $("#cur-name").textContent = CUR.file;
+  $("#cur-name").title = `the selected video: ${videoId} · ${CUR.file}`;
+}
 
 async function refreshState() {
   STATE = await api("/api/state");
   $("#worker").textContent = STATE.worker.message === "idle" ? "" : `● ${STATE.worker.message}`;
+  const key = JSON.stringify(STATE.settings.labels);
+  if (key !== appliedLabels) { appliedLabels = key; applyLabels(); }
+  markNextSetting();
 }
+
+/** Setup page: a breathing glow on the next setting that is missing, and none when all are set. */
+function markNextSetting() {
+  const s = STATE.settings;
+  const next = !s.labeler ? ($("#labeler").value.trim() ? "#save-labeler" : "#labeler")
+    : !s.libraries.length ? "#choose-library" : null;
+  for (const sel of ["#labeler", "#save-labeler", "#choose-library"]) $(sel).classList.toggle("needs", sel === next);
+}
+
+// ---------------------------------------------------------------- labels (Setup page)
+
+// Values from 1: event labels; 0: background (the fill of watched time); -1: ignore.
+// Each label has a keyboard key (Setup page) that sets the label of the selected segment.
+let appliedLabels = null;
+const labels = () => STATE?.settings.labels ?? [];
+const labelName = (v) => labels().find((x) => x.value === v)?.name ?? String(v);
+const defaultEvent = () => labels().find((x) => x.value >= 1)?.value ?? 1;   // Accept, P, Start/End
+/** The color of a label (Setup page). */
+const labelColor = (v) => labels().find((x) => x.value === v)?.color ?? "#868e96";
+/** Black or white, whichever reads better on the color `hex`. */
+function textOn(hex) {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+    .map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.4 ? "#000" : "#fff";
+}
+/** The first palette color that no label in `list` uses. */
+function freeColor(list) {
+  const palette = STATE?.label_palette ?? ["#d9480f"];
+  const used = new Set(list.map((x) => x.color));
+  return palette.find((c) => !used.has(c)) ?? palette[list.length % palette.length];
+}
+const kbd = (key) => `<kbd>${key === " " ? "Space" : key.toUpperCase()}</kbd>`;
+const escapeHtml = (t) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+/** Put the label names into the labeling screen: texts, the label buttons, and the legend. */
+function applyLabels() {
+  document.querySelectorAll("[data-label]").forEach((el) => {
+    const k = el.dataset.label;
+    el.textContent = k === "event" || k === "event-name" ? labelName(defaultEvent()) : labelName(k === "0-name" ? 0 : Number(k));
+  });
+  const btns = $("#set-label-btns"), holds = $("#hold-btns"), help = $("#help-label-keys");
+  btns.innerHTML = holds.innerHTML = help.innerHTML = "";
+  for (const x of labels()) {
+    const name = escapeHtml(x.name);
+    const b = document.createElement("button");
+    Object.assign(b.dataset, { act: "set-label", value: x.value });
+    b.innerHTML = `${name} ${kbd(x.key)}`;
+    b.title = `set the label of the selected segment to ${x.name} (key ${x.key.toUpperCase()})`;
+    b.style.background = b.style.borderColor = x.color;
+    b.style.color = textOn(x.color);
+    btns.appendChild(b);
+
+    const h = document.createElement("button");
+    Object.assign(h.dataset, { act: "hold", value: x.value });
+    const isDefault = x.value === defaultEvent();
+    h.innerHTML = `Hold: ${name}` + (isDefault ? ` ${kbd("p")}` : "");
+    h.title = `hold down while the video plays to mark ${x.name}` + (isDefault ? " (hold P)" : "");
+    h.style.setProperty("--c", x.color);
+    h.style.setProperty("--c-fg", textOn(x.color));
+    holds.appendChild(h);
+
+    help.insertAdjacentHTML("beforeend", `<tr><td>${kbd(x.key)}</td><td>set the selected segment to ${name}</td></tr>`);
+  }
+  $("#reserved-keys").textContent = [...(STATE?.reserved_keys ?? "")].map((k) => (k === " " ? "Space" : k.toUpperCase())).join(" ");
+  const legend = $("#legend-labels");
+  legend.innerHTML = "";
+  const swatch = (color, text) => {
+    const span = document.createElement("span");
+    span.innerHTML = `<i class="sw" style="background: ${color}"></i>`;
+    span.append(text);
+    legend.appendChild(span);
+  };
+  for (const x of labels()) {
+    swatch(x.color, x.name);
+    if (x.value === 0) swatch("var(--rejected)", `${x.name}, rejected suggestion`);
+  }
+  // The Accept / Reject / Unsure and Start / End buttons take the colors of their labels.
+  const root = document.documentElement.style;
+  for (const [name, v] of [["event", defaultEvent()], ["bg", 0], ["ignore", -1]]) {
+    root.setProperty(`--lbl-${name}`, labelColor(v));
+    root.setProperty(`--lbl-${name}-fg`, textOn(labelColor(v)));
+  }
+  render();
+}
+
+let labelDraft = null;   // the label list on the Setup page while it is edited
+function renderLabelConfig() {
+  const tbody = $("#label-config tbody");
+  tbody.innerHTML = "";
+  labelDraft.forEach((x, i) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td><input maxlength="1"></td><td><input></td><td><input type="color"></td><td class="small muted"></td><td class="small muted mono"></td><td></td>`;
+    const [key, name, color] = tr.querySelectorAll("input");
+    color.value = x.color;
+    color.title = "click to choose the color of this label";
+    color.oninput = () => { x.color = color.value; $("#labels-status").textContent = "Not saved yet."; };
+    key.value = x.key.toUpperCase();
+    key.oninput = () => { x.key = key.value.toLowerCase(); $("#labels-status").textContent = "Not saved yet."; };
+    tr.children[4].textContent = x.value;
+    name.value = x.name;
+    name.oninput = () => { x.name = name.value; $("#labels-status").textContent = "Not saved yet."; };
+    tr.children[3].textContent = x.value === 0 ? "background (fill, reject)" : x.value === -1 ? "ignore" : i === 0 ? "event (default)" : "event";
+    if (x.value >= 1) {
+      const rm = document.createElement("button");
+      rm.textContent = "Remove";
+      rm.onclick = () => { labelDraft.splice(i, 1); renderLabelConfig(); $("#labels-status").textContent = "Not saved yet."; };
+      tr.children[5].appendChild(rm);
+    }
+    tbody.appendChild(tr);
+  });
+}
+$("#add-label").onclick = () => {
+  // A new value is never reused from a removed label, so old exports keep their meaning.
+  const value = Math.max(0, ...labelDraft.map((x) => x.value), ...labels().map((x) => x.value)) + 1;
+  if (value > 99) return flash("Too many labels");
+  labelDraft.splice(labelDraft.filter((x) => x.value >= 1).length, 0, { value, name: "", key: "", color: freeColor(labelDraft) });
+  renderLabelConfig();
+};
+$("#save-labels").onclick = async () => {
+  try {
+    labelDraft = (await post("/api/settings/labels", { labels: labelDraft })).map((x) => ({ ...x }));
+    await refreshState();
+    renderLabelConfig();
+    $("#labels-status").textContent = "Saved.";
+  } catch (e) { $("#labels-status").textContent = `Not saved: ${e.message}`; }
+};
 setInterval(() => refreshState().catch(() => {}), 3000);
 
 // ---------------------------------------------------------------- setup
@@ -53,6 +205,10 @@ async function loadSetup() {
   $("#labeler-status").textContent = s.labeler ? "" : "Not saved yet.";
   $("#ws-path").textContent = STATE.workspace;
   $("#ffmpeg-version").textContent = STATE.ffmpeg;
+  if (!labelDraft || $("#labels-status").textContent !== "Not saved yet.") {
+    labelDraft = s.labels.map((x) => ({ ...x }));
+    renderLabelConfig();
+  }
   const ul = $("#libraries");
   ul.innerHTML = "";
   for (const lib of s.libraries) {
@@ -63,24 +219,6 @@ async function loadSetup() {
     ul.appendChild(li);
   }
   if (!s.libraries.length) ul.innerHTML = `<li class="muted">No library yet.</li>`;
-  $("#key-status").textContent = STATE.key_present ? "A key is stored." : "No key yet.";
-  const sel = $("#model");
-  sel.innerHTML = `<option>${s.grok_model}</option>`;
-  if (STATE.key_present) {
-    api("/api/grok/models").then(({ models }) => fillModels(models)).catch(() => {});
-  }
-}
-
-function fillModels(models) {
-  const sel = $("#model"), current = STATE.settings.grok_model;
-  sel.innerHTML = "";
-  const ids = models.map((m) => m.id);
-  if (!ids.includes(current)) ids.unshift(current);
-  for (const id of ids) {
-    const m = models.find((x) => x.id === id);
-    const opt = new Option(id + (m?.image_input ? "  (images)" : ""), id, false, id === current);
-    sel.add(opt);
-  }
 }
 
 let labelerDirty = false;
@@ -94,7 +232,11 @@ async function saveLabeler() {
     $("#labeler-status").textContent = "Saved.";
   } catch (e) { $("#labeler-status").textContent = `Not saved: ${e.message}`; }
 }
-$("#labeler").addEventListener("input", () => { labelerDirty = true; $("#labeler-status").textContent = "Not saved yet."; });
+$("#labeler").addEventListener("input", () => {
+  labelerDirty = true;
+  $("#labeler-status").textContent = "Not saved yet.";
+  if (STATE) markNextSetting();
+});
 $("#labeler").addEventListener("change", saveLabeler);   // also saves when the field loses focus
 $("#labeler").addEventListener("keydown", (e) => { if (e.key === "Enter") saveLabeler(); });
 $("#save-labeler").onclick = saveLabeler;
@@ -106,17 +248,6 @@ $("#add-library").onclick = async () => {
   try { await post("/api/libraries", { path: $("#library-path").value }); $("#library-path").value = ""; loadSetup(); }
   catch (e) { alertInline(e.message); }
 };
-$("#save-key").onclick = async () => {
-  $("#key-status").textContent = "Testing…";
-  try {
-    const { models } = await post("/api/grok/key", { key: $("#api-key").value });
-    $("#api-key").value = "";
-    await refreshState();
-    $("#key-status").textContent = "The key works and is stored.";
-    fillModels(models);
-  } catch (e) { $("#key-status").textContent = e.message; }
-};
-$("#save-model").onclick = async () => { await post("/api/settings", { grok_model: $("#model").value }); flash("Model saved"); };
 
 function alertInline(msg) { flash(msg); }
 
@@ -138,17 +269,67 @@ async function loadJobs() {
     td[1].title = v.library;
     td[2].textContent = fmtTime(v.duration_s);
     td[3].textContent = v.step;
-    td[4].textContent = v.status === "waiting_key" ? "needs API key" : v.status;
+    td[4].textContent = v.status;
     if (v.error) { td[4].className = "err"; td[4].title = v.error; td[4].textContent = `error: ${v.error.slice(0, 80)}`; }
     td[5].textContent = v.candidates ?? "";
     td[6].textContent = v.watched_fraction ? `${Math.round(v.watched_fraction * 100)}%` : "";
     td[7].textContent = v.label_status ?? "";
-    if (ready) td[8].innerHTML = `<a href="#label/${v.video_id}">Label</a>`;
+    if (ready) {
+      td[8].innerHTML = `<button class="b-primary">Label</button><button class="b-strong">Export for prelabeling</button>`;
+      td[8].children[0].onclick = () => (location.hash = `#label/${v.video_id}`);
+      td[8].children[1].onclick = () => (location.hash = `#prelabel/${v.video_id}`);
+    }
     tbody.appendChild(tr);
   }
   if (!rows.length) tbody.innerHTML = `<tr><td colspan="9" class="muted">No videos. Add a library on the Setup page.</td></tr>`;
+  await loadTrainStats();
   if (!$("#view-jobs").hidden) jobsTimer = setTimeout(loadJobs, 3000);
 }
+
+// ---------------------------------------------------------------- training data and export
+
+// All watched time is checked by a person and goes into the export (export.py); skipped videos do not.
+async function loadTrainStats() {
+  const st = await api("/api/export/stats");
+  $("#train-total").textContent = st.seconds
+    ? `Available for training: ${st.seconds.toFixed(1)} s (${fmtTime(st.seconds)}) from ${st.videos} video${st.videos === 1 ? "" : "s"}, ${st.clips} part${st.clips === 1 ? "" : "s"}`
+    : "No watched time yet: watch and label parts of a video first.";
+  const tbody = $("#train-table tbody");
+  tbody.innerHTML = "";
+  for (const x of st.labels) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td><i class="sw"></i><span></span></td><td>${kbd(x.key)}</td><td class="mono num-cell"></td><td class="num-cell"></td><td class="num-cell"></td>`;
+    tr.querySelector(".sw").style.background = x.color;
+    tr.querySelector("span").textContent = x.name;
+    tr.children[2].textContent = x.value;
+    tr.children[3].textContent = x.instances;
+    tr.children[4].textContent = x.seconds.toFixed(1);
+    tbody.appendChild(tr);
+  }
+  $("#train-note").textContent = st.dropped_short_parts
+    ? `${st.dropped_short_parts} watched part${st.dropped_short_parts === 1 ? " is" : "s are"} shorter than one training window (${st.window_s} s) and ${st.dropped_short_parts === 1 ? "is" : "are"} left out.`
+    : "";
+  if (!$("#export-run").dataset.busy) $("#export-run").disabled = !st.clips;
+}
+
+$("#export-run").onclick = async () => {
+  const btn = $("#export-run"), status = $("#export-status");
+  btn.disabled = true;
+  btn.dataset.busy = "1";
+  status.className = "small muted";
+  status.textContent = "Exporting: cutting the clips and writing the label files…";
+  $("#export-result").hidden = true;
+  try {
+    const r = await post("/api/export");
+    status.className = "small ok";
+    status.textContent = `Exported ${r.clips} clip${r.clips === 1 ? "" : "s"} from ${r.videos} video${r.videos === 1 ? "" : "s"}.`;
+    $("#export-path").textContent = r.path;
+    $("#export-reveal").onclick = () => reveal(r.path);
+    $("#export-result").hidden = false;
+  } catch (e) { status.className = "small err"; status.textContent = e.message; }
+  delete btn.dataset.busy;
+  btn.disabled = false;
+};
 $("#run-jobs").onclick = async () => { await post("/api/jobs/run"); loadJobs(); };
 
 // ---------------------------------------------------------------- labeling state
@@ -156,7 +337,7 @@ $("#run-jobs").onclick = async () => { await post("/api/jobs/run"); loadJobs(); 
 const L = {
   videoId: null, fps: 15, n: 0, duration: 0,
   label: null, cands: [], unusable: [],
-  frame: 0, sel: -1, cand: -1, pendingStart: null, holdStart: null, tagMode: false,
+  frame: 0, sel: -1, cand: -1, pendingStart: null, holdStart: null, holdLabel: 1, tagMode: false,
   lastWatch: null, playUntil: null, undo: [], saveTimer: null, dirty: false,
 };
 const player = $("#player");
@@ -182,7 +363,7 @@ async function openVideo(videoId) {
   $("#note").value = L.label.note || "";
   $("#candidate-info").textContent = data.prelabel
     ? `${L.cands.length} suggested events from ${data.prelabel.model}.\nPress N to play the first one.`
-    : "No suggested events for this video (no API key yet).\nWatch it and mark phone use with P or I/O.";
+    : "No suggested events for this video yet.\nWatch it and mark events with P or I/O, or prepare pre-label files.";
   player.src = data.media_url;
   player.playbackRate = 1;
   history.replaceState(null, "", `#label/${videoId}`);
@@ -281,7 +462,7 @@ function decide(decision) {
   if (!c) return flash("No candidate. Press N first.");
   snapshot();
   const [a, b] = candFrames(c);
-  const label = { accepted: 1, rejected: 0, unsure: -1 }[decision];
+  const label = { accepted: defaultEvent(), rejected: 0, unsure: -1 }[decision];
   const origin = { accepted: "grok_accepted", rejected: "grok_rejected", unsure: "unsure" }[decision];
   // Remove an earlier decision on this candidate before the new one.
   L.label.segments = L.label.segments.filter((s) => s.candidate_id !== c.id);
@@ -319,7 +500,7 @@ function setEdge(which) {
   } else if (L.pendingStart != null) {
     const a = Math.min(L.pendingStart, f), b = Math.max(L.pendingStart, f);
     snapshot();
-    L.sel = paint({ start_frame: a, end_frame: b, label: 1, origin: "manual", tags: [] });
+    L.sel = paint({ start_frame: a, end_frame: b, label: defaultEvent(), origin: "manual", tags: [] });
     L.pendingStart = null;
     changed();
   } else flash("Press I first, or select a segment");
@@ -433,8 +614,12 @@ function loadSummary() {
   summaryTimer = setTimeout(async () => {
     const s = await api(`/api/summary?video_id=${L.videoId}`);
     const a = s.all, v = s.video;
+    const byLabel = labels().filter((x) => x.value >= 1).length > 1
+      ? labels().filter((x) => x.value >= 1).map((x) => [`· ${x.name}`, a.events_by_label[x.name] ?? 0, v?.events_by_label[x.name] ?? (v ? 0 : null)])
+      : [];
     const rows = [
-      ["phone events", a.phone_events, v?.phone_events, true],
+      ["events", a.events, v?.events, true],
+      ...byLabel,
       ["source videos", a.source_videos, null, true],
       ["positive windows", a.positive_windows, v?.positive_windows],
       ["negative windows", a.negative_windows, v?.negative_windows],
@@ -467,9 +652,7 @@ const KEYMAP = {
   Enter: () => setStatus("done"),
   Delete: () => deleteSelected(),
   Backspace: () => deleteSelected(),
-  Escape: () => { L.sel = -1; L.pendingStart = null; L.tagMode = false; $("#help").hidden = true; $("#export-dlg").hidden = true; render(); },
-  1: () => setSelectedLabel(1),
-  0: () => setSelectedLabel(0),
+  Escape: () => { L.sel = -1; L.pendingStart = null; L.tagMode = false; $("#help").hidden = true; render(); },
   "?": () => ($("#help").hidden = !$("#help").hidden),
 };
 
@@ -493,27 +676,31 @@ document.addEventListener("keydown", (e) => {
   L.tagMode = false;
   if (e.key.toLowerCase() === "p") {
     e.preventDefault();
-    if (!e.repeat) startHold();
+    if (!e.repeat) startHold(defaultEvent());
     return;
   }
   const fn = KEYMAP[e.key] || KEYMAP[e.key.toLowerCase()];
-  if (fn) { e.preventDefault(); fn(e); }
+  if (fn) { e.preventDefault(); return fn(e); }
+  const lab = labels().find((x) => x.key === e.key.toLowerCase());   // label keys (Setup page)
+  if (lab) { e.preventDefault(); setSelectedLabel(lab.value); }
 });
 document.addEventListener("keyup", (e) => { if (e.key.toLowerCase() === "p") finishHold(); });
 
-function startHold() {
+/** Hold (P, or a Hold button): mark `value` from the frame where the hold starts to where it ends. */
+function startHold(value) {
   if (L.holdStart != null) return;
   L.holdStart = L.frame;
-  $('[data-act="hold"]').classList.add("down");
+  L.holdLabel = value;
+  $(`#hold-btns [data-value="${value}"]`)?.classList.add("down");
   render();
 }
 function finishHold() {
-  $('[data-act="hold"]').classList.remove("down");
+  document.querySelectorAll("#hold-btns .down").forEach((b) => b.classList.remove("down"));
   if (L.holdStart == null) return;
   const a = Math.min(L.holdStart, L.frame), b = Math.max(L.holdStart, L.frame);
   L.holdStart = null;
   snapshot();
-  L.sel = paint({ start_frame: a, end_frame: b, label: 1, origin: "manual", tags: [] });
+  L.sel = paint({ start_frame: a, end_frame: b, label: L.holdLabel, origin: "manual", tags: [] });
   changed();
 }
 
@@ -535,11 +722,8 @@ const ACTIONS = {
   random: () => playUnwatched(true),
   done: () => setStatus("done"),
   skip: () => setStatus("skip"),
-  export: () => runExport(),
   help: () => ($("#help").hidden = !$("#help").hidden),
-  "set-phone": () => setSelectedLabel(1),
-  "set-driving": () => setSelectedLabel(0),
-  "set-ignore": () => setSelectedLabel(-1),
+  "set-label": (btn) => setSelectedLabel(Number(btn.dataset.value)),
 };
 const labelMain = $("#label-main");
 // Buttons must not take the keyboard focus: a focused button would also react to Space.
@@ -547,54 +731,28 @@ labelMain.addEventListener("mousedown", (e) => { if (e.target.closest("button[da
 labelMain.addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-act]");
   if (!btn || !L.label || btn.dataset.act === "hold") return;
-  ACTIONS[btn.dataset.act]();
+  ACTIONS[btn.dataset.act](btn);
 });
 
-/** Set the label of the selected segment: 1 phone, 0 driving, -1 ignore. */
+/** Set the label of the selected segment: an event label (1 to 9), 0 background, or -1 ignore. */
 function setSelectedLabel(value) {
   if (L.sel < 0) return flash("Select a segment first (click it on the timeline)");
   snapshot();
   const s = L.label.segments[L.sel];
   s.label = value;
-  if (s.candidate_id) L.label.decisions[s.candidate_id] = { 1: "accepted", 0: "rejected", "-1": "unsure" }[value];
+  if (s.candidate_id) L.label.decisions[s.candidate_id] = value >= 1 ? "accepted" : value === 0 ? "rejected" : "unsure";
   changed();
 }
 
-// ---------------------------------------------------------------- export
-
-async function runExport() {
-  await flushSave();
-  const dlg = $("#export-dlg"), msg = $("#export-msg");
-  $("#export-reveal").hidden = true;
-  msg.textContent = "Exporting the watched parts of all done videos…";
-  dlg.hidden = false;
-  try {
-    const r = await post("/api/export");
-    const c = r.counts;
-    msg.innerHTML = "";
-    const lines = [
-      `${r.clips} clips from ${r.done_videos} done videos.`,
-      `${c.phone_events} phone events, ${c.positive_windows} positive and ${c.negative_windows} negative windows (${r.window_config}).`,
-      r.dropped_short_parts ? `${r.dropped_short_parts} watched parts were shorter than one window and were left out.` : "",
-      `Folder: ${r.path}`,
-    ];
-    for (const t of lines.filter(Boolean)) { const d = document.createElement("div"); d.textContent = t; msg.appendChild(d); }
-    if (!r.done_videos) msg.firstChild.textContent = "No video is marked done yet. Press Enter (Done) on a video first.";
-    const reveal = $("#export-reveal");
-    reveal.hidden = false;
-    reveal.onclick = () => post("/api/export/reveal", { path: r.path });
-  } catch (e) { msg.textContent = e.message; }
-}
-$("#export-close").onclick = () => ($("#export-dlg").hidden = true);
-$("#export-jobs").onclick = () => runExport();
-const holdBtn = $('[data-act="hold"]');
-holdBtn.addEventListener("pointerdown", (e) => {
-  if (!L.label) return;
-  try { holdBtn.setPointerCapture(e.pointerId); } catch { /* not an active pointer */ }
-  startHold();
+const holdBtns = $("#hold-btns");
+holdBtns.addEventListener("pointerdown", (e) => {
+  const btn = e.target.closest('button[data-act="hold"]');
+  if (!btn || !L.label) return;
+  try { btn.setPointerCapture(e.pointerId); } catch { /* not an active pointer */ }
+  startHold(Number(btn.dataset.value));
 });
-holdBtn.addEventListener("pointerup", finishHold);
-holdBtn.addEventListener("pointercancel", finishHold);
+holdBtns.addEventListener("pointerup", finishHold);
+holdBtns.addEventListener("pointercancel", finishHold);
 
 const speedInput = $("#speed");
 speedInput.addEventListener("input", () => { player.playbackRate = SPEEDS[Number(speedInput.value)]; render(); });
@@ -623,9 +781,8 @@ const TICKS_Y = 58;
 const TRACK_NAMES = [["suggested", "cand"], ["labels", "mine"], ["watched", "watched"]];
 
 function segColor(s) {
-  if (s.label === 1) return css("--phone");
-  if (s.label === -1) return css("--unsure");
-  return s.origin === "grok_rejected" ? css("--rejected") : css("--driving");
+  if (s.label === 0 && s.origin === "grok_rejected") return css("--rejected");
+  return labelColor(s.label);
 }
 
 function drawTimeline(canvas, t0, t1) {
@@ -662,9 +819,9 @@ function drawTimeline(canvas, t0, t1) {
     ctx.fillRect(fx(s.start_frame), TRACKS.mine[0], fw(s.start_frame, s.end_frame), TRACKS.mine[1]);
     if (i === L.sel) { ctx.strokeStyle = css("--text"); ctx.lineWidth = 2; ctx.strokeRect(fx(s.start_frame), TRACKS.mine[0], fw(s.start_frame, s.end_frame), TRACKS.mine[1]); }
   });
-  for (const [a, b] of [[L.pendingStart, L.frame], [L.holdStart, L.frame]]) {
+  for (const [a, b, v] of [[L.pendingStart, L.frame, defaultEvent()], [L.holdStart, L.frame, L.holdLabel]]) {
     if (a == null) continue;
-    ctx.fillStyle = css("--phone");
+    ctx.fillStyle = labelColor(v);
     ctx.globalAlpha = 0.4;
     ctx.fillRect(fx(Math.min(a, b)), TRACKS.mine[0], fw(Math.min(a, b), Math.max(a, b)), TRACKS.mine[1]);
     ctx.globalAlpha = 1;
@@ -732,7 +889,7 @@ function render() {
 
   const s = L.label.segments[L.sel];
   if (s) {
-    const name = { 1: "phone (1)", 0: "driving (0)", "-1": "ignore (−1)" }[s.label];
+    const name = labelName(s.label);
     $("#sel-info").textContent = `${name} · frames ${s.start_frame}–${s.end_frame} · ${((s.end_frame - s.start_frame + 1) / L.fps).toFixed(2)} s · ${s.origin}`;
   } else $("#sel-info").textContent = L.pendingStart != null ? `new segment from frame ${L.pendingStart}…` : "nothing selected";
   $("#sel-tags").innerHTML = (STATE?.tags || []).map((t, i) => `<span class="${s?.tags.includes(t) ? "on" : ""}">${i + 1} ${t}</span>`).join("");
@@ -797,9 +954,144 @@ function timelineDrag(canvas, rangeFn, isZoom) {
 timelineDrag($("#tl-full"), () => [0, L.duration], false);
 timelineDrag($("#tl-zoom"), zoomRange, true);
 
+// ---------------------------------------------------------------- prepare prelabel
+
+// A wizard for the selected video (video_label/manual.py): 1. prepare a directory of frames and a
+// README.md, 2. paste the instruction into a labeling LLM session, 3. import its prelabels.json.
+// Done steps collapse to "again" buttons; another video starts the page fresh.
+const READY_STEPS = ["normalized", "frames", "prelabeled"];
+let mpDefaults = null, mpTimer = null;
+let mpVideoId = null;   // the video that the page shows
+let mpOpen = {};        // steps opened again with their button
+let mpSet = null;       // the newest prepared directory of the video
+const mpModels = {};    // typed model names, by directory
+
+async function loadPrelabel(videoId) {
+  clearTimeout(mpTimer);
+  videoId = videoId || CUR?.video_id;
+  if (videoId !== mpVideoId) {
+    mpVideoId = videoId;
+    mpOpen = {};
+    $("#mp-status").textContent = $("#mp-import-status").textContent = "";
+    $("#mp-readme-box").hidden = true;
+  }
+  const video = (await api("/api/videos")).find((v) => v.video_id === videoId && READY_STEPS.includes(v.step));
+  const data = await api(`/api/manual?video_id=${encodeURIComponent(videoId)}`);
+  if (!mpDefaults) {
+    mpDefaults = data.defaults;
+    $("#mp-fps").value = mpDefaults.sample_fps;
+    $("#mp-height").value = mpDefaults.height;
+    $("#mp-readme").value = mpDefaults.readme;
+    $("#mp-placeholders").textContent = mpDefaults.placeholders.join(" ");
+  }
+  mpSet = video ? data.sets[0] ?? null : null;   // newest first
+  mpImages(video);
+  mpNotice(video);
+  renderWizard(video);
+  // Look for prelabels.json again while the model works.
+  if (!$("#view-prelabel").hidden) mpTimer = setTimeout(() => loadPrelabel().catch(() => {}), 5000);
+}
+
+function renderWizard(video) {
+  const set = mpSet, imported = !!set?.imported_run;
+  const show = {
+    prepare: !set || mpOpen.prepare,
+    instruction: !!set && (!imported || mpOpen.instruction),
+    import: !!set && (!imported || mpOpen.import),
+  };
+  const again = { prepare: !!set && !show.prepare, instruction: imported && !show.instruction, import: imported && !show.import };
+  $("#mp-step-prepare").hidden = !show.prepare;
+  $("#mp-step-instruction").hidden = !show.instruction;
+  $("#mp-step-import").hidden = !show.import;
+  for (const b of $("#mp-again").querySelectorAll("button")) b.hidden = !again[b.dataset.open];
+  $("#mp-again").hidden = !Object.values(again).some(Boolean);
+  $("#mp-prepare").disabled = !video;
+  if (!video) $("#mp-status").textContent = "This video is not processed yet.";
+  if (!set) return;
+
+  $("#mp-summary").textContent = `Samples prepared for prelabel: ${set.n_images} images · ${set.sample_fps} fps`;
+  $("#mp-path").textContent = set.path;
+  $("#mp-instruction").textContent = set.instruction;
+  const a = set.answer;
+  $("#mp-answer").className = `small ${a == null ? "muted" : a.ok ? "ok" : "err"}`;
+  $("#mp-answer").textContent = a == null ? "Waiting for prelabels.json (the page looks again every 5 s)."
+    : a.ok ? `prelabels.json is valid: ${a.candidates} candidates, ${a.unusable} unusable ranges` + (a.model ? `, model ${a.model}.` : ".")
+    : `prelabels.json is not valid: ${a.error}`;
+  const model = $("#mp-model");
+  if (document.activeElement !== model) model.value = mpModels[set.name] ?? (a?.model || "");
+  $("#mp-import").disabled = !a?.ok;
+}
+
+/** The orange notice: the video already has suggested events from an imported run. */
+function mpNotice(video) {
+  const box = $("#mp-done");
+  box.hidden = !video?.prelabel_run;
+  if (box.hidden) return;
+  box.innerHTML = "";
+  box.append(`This video is already pre-labeled: ${video.candidates ?? 0} suggested events from the run ${video.prelabel_run}. `
+    + "If you import another prelabels.json, it replaces them. ");
+  const link = document.createElement("a");
+  link.href = `#label/${video.video_id}`;
+  link.textContent = "Label the video";
+  box.appendChild(link);
+}
+
+function mpImages(video) {
+  const n = video ? Math.ceil(video.duration_s * Number($("#mp-fps").value)) : 0;
+  $("#mp-images").textContent = n ? `about ${n} images` : "";
+}
+
+const copyText = (text, what) => navigator.clipboard.writeText(text).then(() => flash(`${what} copied`), () => flash("Cannot copy"));
+const reveal = (path) => post("/api/export/reveal", { path }).catch((e) => flash(e.message));
+
+$("#mp-again").onclick = (e) => {
+  const step = e.target.closest("button")?.dataset.open;
+  if (!step) return;
+  mpOpen[step] = true;
+  loadPrelabel().catch(() => {});
+};
+$("#mp-edit-readme").onclick = () => {
+  $("#mp-readme-box").hidden = !$("#mp-readme-box").hidden;
+  $("#mp-edit-readme").textContent = $("#mp-readme-box").hidden ? "Edit README.md" : "Hide README.md";
+};
+$("#mp-fps").addEventListener("input", () => loadPrelabel());
+$("#mp-reset-readme").onclick = () => { if (mpDefaults) $("#mp-readme").value = mpDefaults.readme; };
+$("#mp-prepare").onclick = async () => {
+  const video_id = CUR?.video_id;
+  if (!video_id) return flash("Choose a video");
+  $("#mp-status").textContent = "Extracting the frames…";
+  $("#mp-prepare").disabled = true;
+  try {
+    const set = await post("/api/manual/prepare", {
+      video_id, sample_fps: Number($("#mp-fps").value), height: Number($("#mp-height").value), readme: $("#mp-readme").value,
+    });
+    $("#mp-status").textContent = "";
+    $("#mp-import-status").textContent = "";
+    flash(`Prepared ${set.n_images} images`);
+    mpOpen = {};
+  } catch (e) { $("#mp-status").textContent = e.message; }
+  await loadPrelabel();
+};
+$("#mp-copy").onclick = () => mpSet && copyText(mpSet.instruction, "Instruction");
+$("#mp-copy-path").onclick = () => mpSet && copyText(mpSet.path, "Path");
+$("#mp-folder").onclick = () => mpSet && reveal(mpSet.path);
+$("#mp-model").oninput = () => { if (mpSet) mpModels[mpSet.name] = $("#mp-model").value; };
+$("#mp-import").onclick = async () => {
+  if (!mpSet) return;
+  try {
+    const r = await post(`/api/manual/${mpSet.name}/import`, { model: $("#mp-model").value });
+    $("#mp-import-status").textContent = "";
+    flash(`Imported ${r.candidates} suggested events`);
+    mpOpen = {};
+  } catch (e) { $("#mp-import-status").className = "small err"; $("#mp-import-status").textContent = e.message; }
+  await loadPrelabel();
+};
+
 // ---------------------------------------------------------------- start
 
 refreshState().then(() => {
-  if (!location.hash) location.hash = STATE.settings.libraries.length && STATE.settings.labeler ? "#jobs" : "#setup";
+  // A first start (or a missing setting) opens the Setup page; otherwise the video list.
+  if (!(STATE.settings.libraries.length && STATE.settings.labeler)) location.hash = "#setup";
+  else if (!location.hash) location.hash = "#jobs";
   route();
 });

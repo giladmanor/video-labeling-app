@@ -42,6 +42,13 @@ do this with your videos.
 person) in a JSON file with `video_id`, `model`, `candidates`, and `unusable` (the fields of
 section 4). Load it with `video-label import-prelabel FILE`. The same check applies.
 
+**A labeling LLM used by hand.** The "Prepare prelabel" page of the app writes all the 2 fps
+frames of a video into one directory (the time is in each file name), with a `README.md` that
+has this task, how to look at every frame, and the result format
+(`video_label/prompts/prelabel-dir-v1.md`). A model session that can read the directory writes
+`prelabels.json` there (the answer schema of section 4, plus `video_id` and `model`), and the
+app imports it with the same check (`video_label/manual.py`, `docs/design.md` section 5.1).
+
 ## 3. System instruction (send as is)
 
 ```text

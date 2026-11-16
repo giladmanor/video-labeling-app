@@ -1,7 +1,8 @@
-"""Export: cut the watched parts of the done videos into clips and write label files.
+"""Export: cut the watched parts of the videos into clips and write label files.
 
-Export (docs/design.md). Each watched range of a video with status "done" becomes
-one clip. The clip frames are cut from the normalized video by frame number, so the label
+Export (docs/design.md section 8). Each watched range of a video becomes one clip: watched time
+is time that a person has seen and checked, so it does not need the status "done". Skipped
+videos are left out. The clip frames are cut from the normalized video by frame number, so the label
 frames stay exact. The manifests use the format of docs/design.md.
 """
 
@@ -16,9 +17,6 @@ from . import __version__, ffmpeg, store
 from .jobs import sha256_file
 from .windows import CONFIGS, summarize
 from .workspace import Workspace, write_json_atomic
-
-LABEL_NAMES = {1: "phone", 0: "driving", -1: "ignore"}
-
 
 class NothingToExport(ValueError):
     pass
@@ -54,12 +52,53 @@ def cut_clip(src: Path, dst: Path, a: int, b: int, fps: float) -> None:
     tmp.replace(dst)
 
 
+def trainable(ws: Workspace) -> list[tuple]:
+    """(video row, label) for each video with watched time that is not skipped."""
+    return [(row, label) for row in ws.videos()
+            if (label := store.load(ws.label_path(row["video_id"]))) and label["status"] != "skip" and label["watched"]]
+
+
+def parts(ws: Workspace):
+    """Each watched range that becomes a clip: (row, label, a, b), and the number of short ranges."""
+    min_s = CONFIGS[ws.settings.window_config].length_s
+    out, short = [], 0
+    for row, label in trainable(ws):
+        for a, b in label["watched"]:
+            if b - a + 1 < math.ceil(min_s * float(label["fps"])):
+                short += 1
+            else:
+                out.append((row, label, a, b))
+    return out, short
+
+
+def stats(ws: Workspace) -> dict:
+    """What an export would hold now: the seconds and, for each label, its segments and seconds."""
+    found, short = parts(ws)
+    per = {x["value"]: {**x, "instances": 0, "seconds": 0.0} for x in ws.settings.labels}
+    total = 0.0
+    for _row, label, a, b in found:
+        fps = float(label["fps"])
+        total += (b - a + 1) / fps
+        for s in clip_segments(label, a, b):
+            if s["label"] in per:
+                per[s["label"]]["instances"] += 1
+                per[s["label"]]["seconds"] += (s["end_frame"] - s["start_frame"] + 1) / fps
+    return {
+        "seconds": round(total, 1),
+        "videos": len({row["video_id"] for row, *_ in found}),
+        "clips": len(found),
+        "dropped_short_parts": short,
+        "window_s": CONFIGS[ws.settings.window_config].length_s,
+        "labels": [{k: (round(v, 1) if k == "seconds" else v) for k, v in x.items()} for x in per.values()],
+    }
+
+
 def export(ws: Workspace, name: str | None = None) -> dict:
     cfg = CONFIGS[ws.settings.window_config]
-    done = [(row, label) for row in ws.videos()
-            if (label := store.load(ws.label_path(row["video_id"]))) and label["status"] == "done"]
-    if not done:
-        raise NothingToExport("No video is marked done yet. Finish a video with Done (Enter) first.")
+    label_names = {str(k): v for k, v in ws.label_names().items()}
+    found, dropped_short = parts(ws)
+    if not found:
+        raise NothingToExport("No watched time yet. Watch and label parts of a video first.")
     now = datetime.now(timezone.utc)
     name = name or f"{ws.settings.labeler or 'labeler'}_{now.strftime('%Y%m%d-%H%M%S')}"
     root = ws.exports_dir / name
@@ -67,68 +106,62 @@ def export(ws: Workspace, name: str | None = None) -> dict:
     (root / "labels").mkdir()
     (root / "manifests").mkdir()
 
-    video_rows, segment_rows, done_labels = [], [], []
-    dropped_short = 0
-    for row, label in done:
-        done_labels.append(label)
+    video_rows, segment_rows, used = [], [], {}
+    for row, label, a, b in found:
+        used[row["video_id"]] = label
         fps = float(label["fps"])
-        min_frames = math.ceil(cfg.length_s * fps)
-        for a, b in label["watched"]:
-            if b - a + 1 < min_frames:
-                dropped_short += 1
-                continue
-            clip_id = f"{row['video_id']}_{a:06d}"
-            segments = clip_segments(label, a, b)
-            dst = root / "videos" / f"{clip_id}.mp4"
-            cut_clip(ws.video_path(row["video_id"]), dst, a, b, fps)
-            n_frames = b - a + 1
-            write_json_atomic(root / "labels" / f"{clip_id}.json", {
-                "clip_id": clip_id,
-                "parent_video_id": row["video_id"],
-                "parent_sha256": row["sha256"],
-                "parent_file": row["rel_path"],
-                "library": Path(row["library"]).name,
-                "group_id": row["video_id"],
-                "clip_start_s": round(a / fps, 6),
-                "clip_start_frame": a,
-                "fps": fps,
-                "n_frames": n_frames,
-                "duration_s": round(n_frames / fps, 6),
-                "labeler": label["labeler"],
-                "audit": False,
-                "labeled_at": label["updated_at"],
-                "label_names": {str(k): v for k, v in LABEL_NAMES.items()},
-                "segments": segments,
-            })
-            video_rows.append({
+        clip_id = f"{row['video_id']}_{a:06d}"
+        segments = clip_segments(label, a, b)
+        dst = root / "videos" / f"{clip_id}.mp4"
+        cut_clip(ws.video_path(row["video_id"]), dst, a, b, fps)
+        n_frames = b - a + 1
+        write_json_atomic(root / "labels" / f"{clip_id}.json", {
+            "clip_id": clip_id,
+            "parent_video_id": row["video_id"],
+            "parent_sha256": row["sha256"],
+            "parent_file": row["rel_path"],
+            "library": Path(row["library"]).name,
+            "group_id": row["video_id"],
+            "clip_start_s": round(a / fps, 6),
+            "clip_start_frame": a,
+            "fps": fps,
+            "n_frames": n_frames,
+            "duration_s": round(n_frames / fps, 6),
+            "labeler": label["labeler"],
+            "audit": False,
+            "labeled_at": label["updated_at"],
+            "label_names": label_names,
+            "segments": segments,
+        })
+        video_rows.append({
+            "video_id": clip_id,
+            "source_file": f"videos/{clip_id}.mp4",
+            "sha256": sha256_file(dst),
+            "fps": fps,
+            "n_frames": n_frames,
+            "duration_s": round(n_frames / fps, 6),
+            "width": row["width"],
+            "height": row["height"],
+            "group_id": row["video_id"],
+            "label_type": "segments",
+            "parent_video_id": row["video_id"],
+            "parent_sha256": row["sha256"],
+            "clip_start_s": round(a / fps, 6),
+            "audit": 0,
+            "labeler": label["labeler"],
+        })
+        for s in segments:
+            segment_rows.append({
                 "video_id": clip_id,
-                "source_file": f"videos/{clip_id}.mp4",
-                "sha256": sha256_file(dst),
-                "fps": fps,
-                "n_frames": n_frames,
-                "duration_s": round(n_frames / fps, 6),
-                "width": row["width"],
-                "height": row["height"],
-                "group_id": row["video_id"],
-                "label_type": "segments",
-                "parent_video_id": row["video_id"],
-                "parent_sha256": row["sha256"],
-                "clip_start_s": round(a / fps, 6),
-                "audit": 0,
-                "labeler": label["labeler"],
+                "start_s": round(s["start_frame"] / fps, 6),
+                "end_s": round((s["end_frame"] + 1) / fps, 6),
+                "start_frame": s["start_frame"],
+                "end_frame": s["end_frame"],
+                "label": s["label"],
+                "source": "human",
+                "origin": s["origin"],
+                "tags": ";".join(s.get("tags", [])),
             })
-            for s in segments:
-                segment_rows.append({
-                    "video_id": clip_id,
-                    "start_s": round(s["start_frame"] / fps, 6),
-                    "end_s": round((s["end_frame"] + 1) / fps, 6),
-                    "start_frame": s["start_frame"],
-                    "end_frame": s["end_frame"],
-                    "label": s["label"],
-                    "source": "human",
-                    "origin": s["origin"],
-                    "tags": ";".join(s.get("tags", [])),
-                })
 
     _write_csv(root / "manifests" / "videos.csv", video_rows, [
         "video_id", "source_file", "sha256", "fps", "n_frames", "duration_s", "width", "height",
@@ -145,12 +178,12 @@ def export(ws: Workspace, name: str | None = None) -> dict:
         "ffmpeg": ffmpeg.version(),
         "labeler": ws.settings.labeler,
         "window_config": cfg.name,
-        "done_videos": len(done_labels),
+        "videos": len(used),
         "clips": len(video_rows),
         "dropped_short_parts": dropped_short,
-        "label_names": {str(k): v for k, v in LABEL_NAMES.items()},
-        "counts": summarize(done_labels, cfg),
-        "prelabel_runs": sorted({lab.get("prelabel_run") or "" for lab in done_labels} - {""}),
+        "label_names": label_names,
+        "counts": summarize(list(used.values()), cfg, ws.label_names()),
+        "prelabel_runs": sorted({lab.get("prelabel_run") or "" for lab in used.values()} - {""}),
     }
     write_json_atomic(root / "export.json", info)
     return info

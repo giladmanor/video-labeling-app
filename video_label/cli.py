@@ -47,7 +47,9 @@ def main(argv: list[str] | None = None) -> None:
         port = getattr(args, "port", 8765)
         url = f"http://127.0.0.1:{port}/"
         if not getattr(args, "no_browser", False):
-            threading.Timer(1.0, webbrowser.open, (url,)).start()
+            # A missing setting opens the Setup page; otherwise the video list.
+            page = "#jobs" if ws.settings.labeler and ws.settings.libraries else "#setup"
+            threading.Timer(1.0, webbrowser.open, (url + page,)).start()
         print(f"video-label: {url}  (workspace {ws.root})")
         uvicorn.run(create_app(ws), host="127.0.0.1", port=port, log_level="warning")
 

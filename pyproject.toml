@@ -27,7 +27,7 @@ build-backend = "setuptools.build_meta"
 include = ["video_label*"]
 
 [tool.setuptools.package-data]
-video_label = ["prompts/*.txt", "static/*"]
+video_label = ["prompts/*.txt", "prompts/*.md", "static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
